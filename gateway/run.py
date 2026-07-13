@@ -5296,11 +5296,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             reply_anchor = self._reply_anchor_for_event(event)
             thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+            from agent.display import build_soul_status_label
+
+            _drain_values = {"action": self._status_action_gerund()}
             if self._queue_during_drain_enabled():
                 self._queue_or_replace_pending_event(session_key, event)
-                message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
+                message = build_soul_status_label(
+                    "gateway_draining_queued", _drain_values,
+                ) or f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
             else:
-                message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+                message = build_soul_status_label(
+                    "gateway_draining_unavailable", _drain_values,
+                ) or f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
 
             await adapter._send_with_retry(
                 chat_id=event.source.chat_id,
@@ -5551,6 +5558,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # terse; detailed iteration/tool state is still available in logs and
         # can be opted in per platform via display.platforms.<platform>.busy_ack_detail.
         status_parts = []
+        elapsed_min = 0
+        iteration = 0
+        max_iter = 0
+        current_tool = ""
         busy_ack_detail_enabled = bool(
             resolve_display_setting(
                 _load_gateway_config(),
@@ -5565,7 +5576,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 summary = running_agent.get_activity_summary()
                 iteration = summary.get("api_call_count", 0)
                 max_iter = summary.get("max_iterations", 0)
-                current_tool = summary.get("current_tool")
+                current_tool = summary.get("current_tool") or ""
                 start_ts = self._running_agents_ts.get(session_key, 0)
                 if start_ts:
                     elapsed_min = int((now - start_ts) / 60)
@@ -5579,33 +5590,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
 
         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
+        from agent.display import build_soul_status_label
+
+        _soul_status_values = {
+            "detail": status_detail,
+            "elapsed_minutes": elapsed_min,
+            "iteration": iteration,
+            "max_iterations": max_iter,
+            "tool_name": current_tool,
+        }
+
+        def _busy_status(status_name: str, fallback: str) -> str:
+            return (
+                build_soul_status_label(status_name, _soul_status_values)
+                or fallback
+            )
+
         if is_steer_mode:
-            message = (
+            message = _busy_status(
+                "busy_steered",
                 f"⏩ Steered into current run{status_detail}. "
-                f"Your message arrives after the next tool call."
+                f"Your message arrives after the next tool call.",
             )
         elif is_queue_mode and demoted_for_subagents:
             # #30170 — explain the demotion so the user knows their
             # follow-up didn't accidentally kill the subagent and
             # discovers `/stop` as the explicit escape hatch.
-            message = (
+            message = _busy_status(
+                "busy_subagent",
                 f"⏳ Subagent working{status_detail} — your message is queued for "
-                f"when it finishes (use /stop to cancel everything)."
+                f"when it finishes (use /stop to cancel everything).",
             )
         elif is_queue_mode and demoted_for_compression:
-            message = (
+            message = _busy_status(
+                "busy_compressing",
                 f"⏳ Compressing context{status_detail} — your message is queued for "
-                f"when it finishes (use /stop to cancel everything)."
+                f"when it finishes (use /stop to cancel everything).",
             )
         elif is_queue_mode:
-            message = (
+            message = _busy_status(
+                "busy_queued",
                 f"⏳ Queued for the next turn{status_detail}. "
-                f"I'll respond once the current task finishes."
+                f"I'll respond once the current task finishes.",
             )
         else:
-            message = (
+            message = _busy_status(
+                "busy_interrupting",
                 f"⚡ Interrupting current task{status_detail}. "
-                f"I'll respond to your message shortly."
+                f"I'll respond to your message shortly.",
             )
 
         # First-touch onboarding: the very first time a user sends a message
@@ -8602,11 +8634,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Stamp every inbound event from this adapter with its profile so
             # the agent turn (and session key) resolve to the right home.
             adapter.set_message_handler(
-                self._make_profile_message_handler(profile_name)
+                self._make_profile_message_handler(profile_name, profile_home)
             )
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
-            adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+            adapter.set_busy_session_handler(
+                self._make_profile_busy_session_handler(profile_name, profile_home)
+            )
+            adapter.set_status_label_renderer(
+                self._make_profile_status_label_renderer(profile_home)
+            )
             adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
             adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
             adapter._busy_text_mode = self._busy_text_mode
@@ -8626,16 +8663,51 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 await self._safe_adapter_disconnect(adapter, platform)
         return connected
 
-    def _make_profile_message_handler(self, profile_name: str):
-        """Return a message handler that stamps source.profile then delegates."""
+    def _make_profile_message_handler(
+        self, profile_name: str, profile_home: Optional["Path"] = None,
+    ):
+        """Stamp and scope a secondary profile's normal inbound messages."""
         async def _handler(event):
             try:
                 if getattr(event, "source", None) is not None and not event.source.profile:
                     event.source.profile = profile_name
             except Exception:
                 pass
+            if profile_home is not None:
+                with _profile_runtime_scope(profile_home):
+                    return await self._handle_message(event)
             return await self._handle_message(event)
         return _handler
+
+    def _make_profile_busy_session_handler(
+        self, profile_name: str, profile_home: "Path",
+    ):
+        """Stamp and scope busy-path messages before any SOUL copy is read."""
+        async def _handler(event, session_key):
+            try:
+                if getattr(event, "source", None) is not None and not event.source.profile:
+                    event.source.profile = profile_name
+            except Exception:
+                pass
+            with _profile_runtime_scope(profile_home):
+                # BasePlatformAdapter keyed the event before this wrapper could
+                # stamp ``source.profile``. Recompute now so secondary profiles
+                # target ``agent:<profile>:...`` rather than legacy agent:main.
+                scoped_session_key = self._session_key_for_source(event.source)
+                return await self._handle_active_session_busy_message(
+                    event, scoped_session_key,
+                )
+        return _handler
+
+    @staticmethod
+    def _make_profile_status_label_renderer(profile_home: "Path"):
+        """Return an adapter-local SOUL renderer isolated to one profile."""
+        def _render(status_name: str, values: Dict[str, Any]) -> Optional[str]:
+            from agent.display import build_soul_status_label
+
+            with _profile_runtime_scope(profile_home):
+                return build_soul_status_label(status_name, values)
+        return _render
 
     @staticmethod
     def _adapter_credential_fingerprint(adapter: Any) -> Optional[str]:
@@ -9318,6 +9390,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     self._enqueue_fifo(_quick_key, queued_event, adapter)
                 depth = self._queue_depth(_quick_key, adapter=self._adapter_for_source(source))
+                from agent.display import build_soul_status_label
+
+                _soul_queued = build_soul_status_label(
+                    "busy_queued", {"queue_depth": depth},
+                )
+                if _soul_queued:
+                    return _soul_queued
                 if depth <= 1:
                     return "Queued for the next turn."
                 return f"Queued for the next turn. ({depth} queued)"
@@ -9344,7 +9423,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             channel_prompt=event.channel_prompt,
                         )
                         adapter._pending_messages[_quick_key] = queued_event
-                    return "Agent still starting — /steer queued for the next turn."
+                    from agent.display import build_soul_status_label
+
+                    return build_soul_status_label(
+                        "busy_queued", {"queue_depth": 1},
+                    ) or "Agent still starting — /steer queued for the next turn."
                 if running_agent and hasattr(running_agent, "steer"):
                     try:
                         accepted = running_agent.steer(steer_text)
@@ -9353,7 +9436,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         return f"⚠️ Steer failed: {exc}"
                     if accepted:
                         preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
-                        return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
+                        from agent.display import build_soul_status_label
+
+                        return build_soul_status_label(
+                            "busy_steered", {"preview": preview},
+                        ) or f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
                     return "Steer rejected (empty payload)."
                 # Running agent is missing or lacks steer() — fall back to queue.
                 adapter = self._adapter_for_source(source)
@@ -9366,7 +9453,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         channel_prompt=event.channel_prompt,
                     )
                     adapter._pending_messages[_quick_key] = queued_event
-                return "No active agent — /steer queued for the next turn."
+                from agent.display import build_soul_status_label
+
+                return build_soul_status_label(
+                    "busy_queued", {"queue_depth": 1},
+                ) or "No active agent — /steer queued for the next turn."
 
             # /model must not be used while the agent is running.
             if _cmd_def_inner and _cmd_def_inner.name == "model":
@@ -9537,11 +9628,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if self._draining:
                 if self._queue_during_drain_enabled():
                     self._queue_or_replace_pending_event(_quick_key, event)
-                return (
-                    f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
-                    if self._queue_during_drain_enabled()
-                    else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
-                )
+                from agent.display import build_soul_status_label
+
+                _drain_values = {"action": self._status_action_gerund()}
+                if self._queue_during_drain_enabled():
+                    return build_soul_status_label(
+                        "gateway_draining_queued", _drain_values,
+                    ) or f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
+                return build_soul_status_label(
+                    "gateway_draining_unavailable", _drain_values,
+                ) or f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
             if self._busy_input_mode == "queue":
                 logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
                 self._queue_or_replace_pending_event(_quick_key, event)
@@ -9990,7 +10086,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return await self._handle_voice_command(event)
 
         if self._draining:
-            return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
+            from agent.display import build_soul_status_label
+
+            return build_soul_status_label(
+                "gateway_draining_unavailable",
+                {"action": self._status_action_gerund()},
+            ) or f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
 
         # User-defined quick commands (bypass agent loop, no LLM call)
         if command:
@@ -10244,7 +10345,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "Refusing new turn for session %s — external drain active.",
                 _quick_key,
             )
-            return (
+            from agent.display import build_soul_status_label
+
+            return build_soul_status_label(
+                "external_draining_unavailable", {"action": "maintenance"},
+            ) or (
                 "⏳ This agent is draining for a maintenance action and isn't "
                 "accepting new turns right now. It'll be back in a moment — "
                 "please resend shortly."
@@ -19387,6 +19492,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # who want it can opt in per platform.
                 _agent_ref = agent_holder[0]
                 _status_detail = ""
+                _iteration = 0
+                _max_iterations = 0
+                _current_tool = ""
+                _activity = ""
                 _want_iteration_detail = bool(
                     resolve_display_setting(
                         user_config,
@@ -19399,22 +19508,37 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     try:
                         _a = _agent_ref.get_activity_summary()
                         _parts = []
+                        _iteration = _a.get("api_call_count", 0)
+                        _max_iterations = _a.get("max_iterations", 0)
                         if _want_iteration_detail:
                             _parts.append(
-                                f"iteration {_a['api_call_count']}/{_a['max_iterations']}"
+                                f"iteration {_iteration}/{_max_iterations}"
                             )
-                        _action = _a.get("current_tool") or _a.get("last_activity_desc")
+                        _current_tool = _a.get("current_tool") or ""
+                        _action = _current_tool or _a.get("last_activity_desc")
                         if _action:
-                            _parts.append(str(_action))
+                            _activity = str(_action)
+                            _parts.append(_activity)
                         if _parts:
                             _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
-                _heartbeat_text = (
-                    _generic_status_phrase("status")
-                    if _long_running_mode == "generic"
-                    else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
-                )
+                if _long_running_mode == "generic":
+                    _heartbeat_text = _generic_status_phrase("status")
+                else:
+                    from agent.display import build_soul_status_label
+
+                    _heartbeat_text = build_soul_status_label(
+                        "long_running",
+                        {
+                            "activity": _activity,
+                            "detail": _status_detail,
+                            "elapsed_minutes": _elapsed_mins,
+                            "iteration": _iteration,
+                            "max_iterations": _max_iterations,
+                            "tool_name": _current_tool,
+                        },
+                    ) or f"⏳ Working — {_elapsed_mins} min{_status_detail}"
                 try:
                     _notify_res = None
                     if _heartbeat_msg_id:

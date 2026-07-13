@@ -333,6 +333,29 @@ class TestNewTurnGate:
         assert "draining" in result.lower()
 
     @pytest.mark.asyncio
+    async def test_external_drain_uses_soul_status_label(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            '  external_draining_unavailable: "メンテナンスを待っててね♡"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        runner, _ = _drain_runner()
+        runner._external_drain_active = True
+        event = MessageEvent(
+            text="hello",
+            message_type=MessageType.TEXT,
+            source=make_restart_source(),
+            message_id="m-soul",
+        )
+
+        assert await runner._handle_message(event) == "メンテナンスを待っててね♡"
+
+    @pytest.mark.asyncio
     async def test_in_flight_turn_not_interrupted_by_drain(self):
         # Entering drain must NOT touch the running-agents set.
         runner, _ = _drain_runner()

@@ -89,6 +89,32 @@ async def test_draining_rejects_new_session_messages():
     assert result == "⏳ Gateway is restarting and is not accepting new work right now."
 
 
+@pytest.mark.asyncio
+async def test_draining_new_session_uses_soul_status_label(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  gateway_draining_unavailable: "再起動を待っててね♡"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    runner, _adapter = make_restart_runner()
+    runner._draining = True
+    runner._restart_requested = True
+
+    event = MessageEvent(
+        text="hello",
+        message_type=MessageType.TEXT,
+        source=make_restart_source("fresh-soul"),
+        message_id="m-soul",
+    )
+
+    assert await runner._handle_message(event) == "再起動を待っててね♡"
+
+
 def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.delenv("HERMES_GATEWAY_BUSY_INPUT_MODE", raising=False)

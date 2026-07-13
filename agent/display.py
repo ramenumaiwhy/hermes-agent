@@ -609,17 +609,21 @@ _TOOL_VERBS_FOR_CONNECTOR: frozenset[str] = frozenset({
 
 _friendly_tool_labels: bool = True
 
-# Optional per-persona tool labels live in SOUL.md frontmatter so display copy
-# stays attached to the identity it represents.  The cache is keyed by the
-# profile-aware path and mtime; editing SOUL.md is therefore picked up without
-# making every progress event parse YAML again.
-_soul_tool_labels_cache_key: tuple[str, int] | None = None
-_soul_tool_labels_cache: dict[str, str] = {}
+# Optional per-persona progress labels live in SOUL.md frontmatter so display
+# copy stays attached to the identity it represents.  The cache is keyed by
+# the profile-aware path and mtime; editing SOUL.md is therefore picked up
+# without making every progress event parse YAML again.
+_SOUL_PROGRESS_SECTIONS = ("tool_progress_labels", "status_progress_labels")
+_SOUL_STATUS_PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
+_SOUL_STATUS_TOKEN_RE = re.compile(r"[a-z][a-z0-9_]*")
+_soul_progress_cache: tuple[
+    tuple[str, int], dict[str, dict[str, str]],
+] | None = None
 
 
-def _load_soul_tool_labels() -> dict[str, str]:
-    """Load optional ``tool_progress_labels`` from SOUL.md frontmatter."""
-    global _soul_tool_labels_cache_key, _soul_tool_labels_cache
+def _load_soul_progress_sections() -> dict[str, dict[str, str]]:
+    """Load optional progress-label mappings from SOUL.md frontmatter."""
+    global _soul_progress_cache
 
     try:
         from hermes_constants import get_hermes_home
@@ -630,28 +634,42 @@ def _load_soul_tool_labels() -> dict[str, str]:
         return {}
 
     cache_key = (str(path), mtime_ns)
-    if cache_key == _soul_tool_labels_cache_key:
-        return _soul_tool_labels_cache
+    cache_snapshot = _soul_progress_cache
+    if cache_snapshot is not None and cache_key == cache_snapshot[0]:
+        return cache_snapshot[1]
 
-    labels: dict[str, str] = {}
+    sections: dict[str, dict[str, str]] = {}
     try:
         from agent.skill_utils import parse_frontmatter
 
         text = path.read_text(encoding="utf-8")
         frontmatter, _body = parse_frontmatter(text)
-        raw_labels = frontmatter.get("tool_progress_labels")
-        if isinstance(raw_labels, dict):
-            labels = {
-                str(name): value
-                for name, value in raw_labels.items()
-                if isinstance(value, str) and value.strip()
-            }
+        for section_name in _SOUL_PROGRESS_SECTIONS:
+            raw_labels = frontmatter.get(section_name)
+            if isinstance(raw_labels, dict):
+                sections[section_name] = {
+                    str(name): value
+                    for name, value in raw_labels.items()
+                    if isinstance(value, str) and value.strip()
+                }
     except Exception as exc:  # noqa: BLE001 — cosmetic config must not break tools
-        logger.debug("Could not load SOUL.md tool progress labels: %s", exc)
+        logger.debug("Could not load SOUL.md progress labels: %s", exc)
 
-    _soul_tool_labels_cache_key = cache_key
-    _soul_tool_labels_cache = labels
-    return labels
+    # Publish key+payload atomically. Tool progress callbacks can run in
+    # parallel worker threads for different profiles; separate assignments
+    # could otherwise expose one profile's labels under another profile's key.
+    _soul_progress_cache = (cache_key, sections)
+    return sections
+
+
+def _load_soul_tool_labels() -> dict[str, str]:
+    """Load optional ``tool_progress_labels`` from SOUL.md frontmatter."""
+    return _load_soul_progress_sections().get("tool_progress_labels", {})
+
+
+def _load_soul_status_labels() -> dict[str, str]:
+    """Load optional ``status_progress_labels`` from SOUL.md frontmatter."""
+    return _load_soul_progress_sections().get("status_progress_labels", {})
 
 
 def build_soul_tool_label(
@@ -663,7 +681,8 @@ def build_soul_tool_label(
     """Render a SOUL-defined label, replacing only the safe preview token."""
     if not _friendly_tool_labels:
         return None
-    template = _load_soul_tool_labels().get(tool_name)
+    labels = _load_soul_tool_labels()
+    template = labels.get(tool_name) or labels.get("default")
     if not template:
         return None
     resolved_preview = (
@@ -672,6 +691,49 @@ def build_soul_tool_label(
         else build_tool_preview(tool_name, args, max_len=max_len) or ""
     )
     return template.replace("{preview}", resolved_preview).strip()
+
+
+def build_soul_status_label(
+    status_name: str,
+    values: dict[str, Any] | None = None,
+) -> str | None:
+    """Render a SOUL-defined non-tool progress label.
+
+    Only simple named placeholders supplied by the caller are accepted.  A
+    typo or unsupported placeholder fails closed to the caller's built-in
+    fallback instead of leaking a half-rendered template into chat.
+    """
+    labels = _load_soul_status_labels()
+    template = labels.get(status_name) or labels.get("default")
+    if not template:
+        return None
+
+    safe_values = {
+        str(name): "" if value is None else str(value)
+        for name, value in (values or {}).items()
+    }
+    raw_tokens = set(_SOUL_STATUS_PLACEHOLDER_RE.findall(template))
+    malformed_braces = bool(
+        _SOUL_STATUS_PLACEHOLDER_RE.sub("", template).count("{")
+        or _SOUL_STATUS_PLACEHOLDER_RE.sub("", template).count("}")
+    )
+    invalid_tokens = {
+        token
+        for token in raw_tokens
+        if not _SOUL_STATUS_TOKEN_RE.fullmatch(token) or token not in safe_values
+    }
+    if malformed_braces or invalid_tokens:
+        logger.debug(
+            "Ignoring SOUL.md status label %s with unsupported placeholders: %s",
+            status_name,
+            sorted(invalid_tokens),
+        )
+        return None
+
+    rendered = template
+    for token in raw_tokens:
+        rendered = rendered.replace(f"{{{token}}}", safe_values[token])
+    return rendered.strip() or None
 
 
 def set_friendly_tool_labels(enabled: bool) -> None:

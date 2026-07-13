@@ -143,6 +143,26 @@ class FailingAgent:
         }
 
 
+class SlowStatusAgent:
+    """Runs long enough for the gateway's periodic heartbeat to fire."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def get_activity_summary(self):
+        return {
+            "api_call_count": 2,
+            "max_iterations": 150,
+            "current_tool": None,
+            "last_activity_desc": "waiting for non-streaming response (140s elapsed)",
+        }
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        time.sleep(0.2)
+        return {"final_response": "done", "messages": [], "api_calls": 2}
+
+
 def _make_runner(adapter):
     gateway_run = importlib.import_module("gateway.run")
     GatewayRunner = gateway_run.GatewayRunner
@@ -231,6 +251,41 @@ async def test_cleanup_off_by_default_leaves_bubbles(monkeypatch, tmp_path):
         for _ in range(10):
             await asyncio.sleep(0.01)
     assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_long_running_heartbeat_uses_soul_status_label(monkeypatch, tmp_path):
+    """The real periodic heartbeat path must not leak its built-in English."""
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, SlowStatusAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "0.05")
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  long_running: "もう{elapsed_minutes}分だね。待っててね♡"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="123")
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-1",
+        session_key="agent:main:discord:group:123",
+    )
+
+    assert result["final_response"] == "done"
+    assert any("待っててね♡" in item["content"] for item in adapter.sent)
+    assert not any("Working —" in item["content"] for item in adapter.sent)
 
 
 @pytest.mark.asyncio

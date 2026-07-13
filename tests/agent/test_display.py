@@ -552,6 +552,24 @@ class TestBuildToolLabel:
             "search_files", {}, max_len=40, preview="ひめの|Himeno",
         ) == "ひめの|Himeno、探してるよ♡"
 
+    def test_soul_default_label_covers_future_tools(self, tmp_path, monkeypatch):
+        from agent.display import build_tool_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "tool_progress_labels:\n"
+            '  default: "新しいお仕事も進めてるよ♡"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_tool_label(
+            "future_plugin_tool", {"query": "secret"},
+        ) == "新しいお仕事も進めてるよ♡"
+
     def test_soul_frontmatter_accepts_windows_newlines(self, tmp_path, monkeypatch):
         from agent.display import build_tool_label
 
@@ -608,3 +626,83 @@ class TestBuildToolLabel:
         assert build_tool_label("read_file", {"path": "/tmp/note.md"}) == (
             "note.mdを大事に読んでるよ💕"
         )
+
+    def test_soul_status_label_replaces_allowlisted_values(self, tmp_path, monkeypatch):
+        from agent.display import build_soul_status_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            '  long_running: "もう{elapsed_minutes}分だよ。待っててね♡"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_soul_status_label(
+            "long_running", {"elapsed_minutes": 3},
+        ) == "もう3分だよ。待っててね♡"
+
+    def test_soul_status_label_with_unknown_token_uses_caller_fallback(
+        self, tmp_path, monkeypatch,
+    ):
+        from agent.display import build_soul_status_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            '  long_running: "{unsupported} sweet"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_soul_status_label(
+            "long_running", {"elapsed_minutes": 3},
+        ) is None
+
+    @pytest.mark.parametrize("placeholder", ["Elapsed", "foo.bar", "bad-name", "foo"])
+    def test_soul_status_label_rejects_non_allowlisted_placeholder_forms(
+        self, tmp_path, monkeypatch, placeholder,
+    ):
+        from agent.display import build_soul_status_label
+
+        hermes_home = tmp_path / placeholder.replace(".", "-")
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            f'  long_running: "{{{placeholder}}} sweet"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_soul_status_label(
+            "long_running", {"elapsed_minutes": 3},
+        ) is None
+
+    @pytest.mark.parametrize("template", ["{elapsed_minutes", "elapsed_minutes}"])
+    def test_soul_status_label_rejects_unbalanced_braces(
+        self, tmp_path, monkeypatch, template,
+    ):
+        from agent.display import build_soul_status_label
+
+        hermes_home = tmp_path / "unbalanced"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            f'  long_running: "{template}"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_soul_status_label(
+            "long_running", {"elapsed_minutes": 3},
+        ) is None

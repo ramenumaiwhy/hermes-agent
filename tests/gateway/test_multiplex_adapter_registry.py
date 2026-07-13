@@ -1,6 +1,7 @@
 """Phase 3: secondary-profile adapter registry + same-token conflict detection."""
 import pytest
 
+from agent.display import build_soul_status_label
 from gateway.run import GatewayRunner
 
 
@@ -88,6 +89,108 @@ class TestProfileMessageHandler:
 
         await handler(_Evt())
         assert seen["profile"] == "writer"
+
+    @pytest.mark.asyncio
+    async def test_scopes_soul_to_secondary_profile(self, tmp_path, monkeypatch):
+        default_home = tmp_path / "default"
+        profile_home = tmp_path / "profiles" / "coder"
+        default_home.mkdir()
+        profile_home.mkdir(parents=True)
+        (default_home / "SOUL.md").write_text(
+            "---\nstatus_progress_labels:\n  busy_queued: default\n---\n",
+            encoding="utf-8",
+        )
+        (profile_home / "SOUL.md").write_text(
+            "---\nstatus_progress_labels:\n  busy_queued: coder\n---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(default_home))
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+
+        async def _fake_handle(event):
+            return event.source.profile, build_soul_status_label("busy_queued")
+
+        runner._handle_message = _fake_handle
+        handler = runner._make_profile_message_handler(
+            "coder", profile_home,
+        )
+
+        class _Src:
+            profile = None
+
+        class _Evt:
+            source = _Src()
+
+        assert await handler(_Evt()) == ("coder", "coder")
+        assert build_soul_status_label("busy_queued") == "default"
+
+
+class TestProfileBusySessionHandler:
+    @pytest.mark.asyncio
+    async def test_scopes_busy_ack_to_secondary_profile(self, tmp_path, monkeypatch):
+        default_home = tmp_path / "default"
+        profile_home = tmp_path / "profiles" / "coder"
+        default_home.mkdir()
+        profile_home.mkdir(parents=True)
+        (default_home / "SOUL.md").write_text(
+            "---\nstatus_progress_labels:\n  busy_interrupting: default\n---\n",
+            encoding="utf-8",
+        )
+        (profile_home / "SOUL.md").write_text(
+            "---\nstatus_progress_labels:\n  busy_interrupting: coder\n---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(default_home))
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._pending_messages = {}
+
+        async def _fake_busy(event, session_key):
+            runner._pending_messages[session_key] = event
+            return (
+                event.source.profile,
+                session_key,
+                build_soul_status_label("busy_interrupting"),
+            )
+
+        runner._handle_active_session_busy_message = _fake_busy
+        runner._session_key_for_source = lambda source: f"agent:{source.profile}:session"
+        handler = runner._make_profile_busy_session_handler(
+            "coder", profile_home,
+        )
+
+        class _Src:
+            profile = None
+
+        class _Evt:
+            source = _Src()
+
+        assert await handler(_Evt(), "agent:main:session") == (
+            "coder", "agent:coder:session", "coder",
+        )
+        assert set(runner._pending_messages) == {"agent:coder:session"}
+        assert build_soul_status_label("busy_interrupting") == "default"
+
+    def test_adapter_local_renderer_is_profile_isolated(self, tmp_path, monkeypatch):
+        default_home = tmp_path / "default"
+        profile_home = tmp_path / "profiles" / "coder"
+        default_home.mkdir()
+        profile_home.mkdir(parents=True)
+        (default_home / "SOUL.md").write_text(
+            "---\nstatus_progress_labels:\n  busy_queued: default\n---\n",
+            encoding="utf-8",
+        )
+        (profile_home / "SOUL.md").write_text(
+            "---\nstatus_progress_labels:\n  busy_queued: coder\n---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(default_home))
+
+        renderer = GatewayRunner._make_profile_status_label_renderer(profile_home)
+
+        assert renderer("busy_queued", {}) == "coder"
+        assert build_soul_status_label("busy_queued") == "default"
 
 
 class TestPortBindingHardError:

@@ -4209,7 +4209,10 @@ class DiscordAdapter(BasePlatformAdapter):
         @tree.command(name="queue", description="Queue a prompt for the next turn (doesn't interrupt)")
         @discord.app_commands.describe(prompt="The prompt to queue")
         async def slash_queue(interaction: discord.Interaction, prompt: str):
-            await self._run_simple_slash(interaction, f"/queue {prompt}", "Queued for the next turn.")
+            followup = self.render_status_label(
+                "busy_queued", {"queue_depth": 1},
+            ) or "Queued for the next turn."
+            await self._run_simple_slash(interaction, f"/queue {prompt}", followup)
 
         @tree.command(name="background", description="Run a prompt in the background")
         @discord.app_commands.describe(prompt="The prompt to run in the background")

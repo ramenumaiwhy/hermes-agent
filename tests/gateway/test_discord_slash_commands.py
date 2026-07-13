@@ -159,6 +159,45 @@ async def test_registers_native_restart_slash_command(adapter):
 
 
 @pytest.mark.asyncio
+async def test_native_queue_slash_uses_soul_status_label(adapter, tmp_path, monkeypatch):
+    from gateway.run import GatewayRunner
+
+    default_home = tmp_path / "default"
+    profile_home = tmp_path / "profiles" / "coder"
+    default_home.mkdir()
+    profile_home.mkdir(parents=True)
+    (default_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  busy_queued: "間違った人格"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    (profile_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  busy_queued: "次のお仕事に預かったよ♡"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    adapter.set_status_label_renderer(
+        GatewayRunner._make_profile_status_label_renderer(profile_home)
+    )
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    interaction = SimpleNamespace()
+    await adapter._client.tree.commands["queue"](interaction, prompt="check it")
+
+    adapter._run_simple_slash.assert_awaited_once_with(
+        interaction,
+        "/queue check it",
+        "次のお仕事に預かったよ♡",
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_simple_slash_executes_when_defer_interaction_expired(adapter):
     class UnknownInteraction(Exception):
         status = 404

@@ -2397,6 +2397,12 @@ class BasePlatformAdapter(ABC):
         self._post_delivery_callbacks: Dict[str, Any] = {}
         self._expected_cancelled_tasks: set[asyncio.Task] = set()
         self._busy_session_handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]] = None
+        # Optional profile-scoped renderer for persona-owned progress copy.
+        # Secondary-profile adapters install a closure that enters that
+        # profile's runtime scope before reading SOUL.md.
+        self._status_label_renderer: Optional[
+            Callable[[str, Dict[str, Any]], Optional[str]]
+        ] = None
         # Optional authorization check, registered by GatewayRunner. Used by
         # adapters that fetch external context (e.g. Slack thread history) to
         # mark senders not on the allowlist as unverified in LLM context,
@@ -2834,6 +2840,26 @@ class BasePlatformAdapter(ABC):
     def set_busy_session_handler(self, handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]]) -> None:
         """Set an optional handler for messages arriving during active sessions."""
         self._busy_session_handler = handler
+
+    def set_status_label_renderer(
+        self,
+        renderer: Optional[Callable[[str, Dict[str, Any]], Optional[str]]],
+    ) -> None:
+        """Set an optional profile-scoped SOUL status-label renderer."""
+        self._status_label_renderer = renderer
+
+    def render_status_label(
+        self,
+        status_name: str,
+        values: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Render persona-owned progress copy for adapter-local UI paths."""
+        renderer = getattr(self, "_status_label_renderer", None)
+        if renderer is not None:
+            return renderer(status_name, values or {})
+        from agent.display import build_soul_status_label
+
+        return build_soul_status_label(status_name, values or {})
 
     def set_authorization_check(
         self,

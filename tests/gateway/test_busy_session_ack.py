@@ -212,6 +212,95 @@ class TestBusySessionAck:
         agent.interrupt.assert_called_once_with("Are you working?")
 
     @pytest.mark.asyncio
+    async def test_busy_ack_uses_soul_status_label(self, tmp_path, monkeypatch):
+        """Busy follow-up acknowledgments inherit the active SOUL persona."""
+        monkeypatch.setattr("agent.onboarding.is_seen", lambda *_a, **_k: True)
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            '  busy_interrupting: "新しいお願いに切り替えるね♡"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="new request")
+        sk = build_session_key(event.source)
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 2,
+            "max_iterations": 150,
+            "current_tool": None,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time() - 180
+        runner.adapters[event.source.platform] = adapter
+
+        await runner._handle_active_session_busy_message(event, sk)
+
+        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert content == "新しいお願いに切り替えるね♡"
+        assert "Interrupting current task" not in content
+
+    @pytest.mark.parametrize(
+        ("mode", "has_subagent", "has_compression", "expected"),
+        [
+            ("steer", False, False, "steered"),
+            ("queue", False, False, "queued"),
+            ("interrupt", True, False, "subagent"),
+            ("interrupt", False, True, "compressing"),
+            ("interrupt", False, False, "interrupting"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_each_busy_status_uses_its_soul_label(
+        self, tmp_path, monkeypatch, mode, has_subagent, has_compression, expected,
+    ):
+        monkeypatch.setattr("agent.onboarding.is_seen", lambda *_a, **_k: True)
+        hermes_home = tmp_path / expected
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            '  busy_steered: "steered"\n'
+            '  busy_queued: "queued"\n'
+            '  busy_subagent: "subagent"\n'
+            '  busy_compressing: "compressing"\n'
+            '  busy_interrupting: "interrupting"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = mode
+        runner._agent_has_active_subagents = lambda _agent: has_subagent
+        runner._session_has_compression_in_flight = AsyncMock(
+            return_value=has_compression,
+        )
+        adapter = _make_adapter()
+        event = _make_event(text="follow up")
+        session_key = build_session_key(event.source)
+        agent = MagicMock()
+        agent.steer.return_value = True
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 1,
+            "max_iterations": 150,
+            "current_tool": None,
+        }
+        runner._running_agents[session_key] = agent
+        runner.adapters[event.source.platform] = adapter
+
+        await runner._handle_active_session_busy_message(event, session_key)
+
+        assert adapter._send_with_retry.call_args.kwargs["content"] == expected
+
+    @pytest.mark.asyncio
     async def test_queue_mode_suppresses_interrupt_and_updates_ack(self):
         """When busy_input_mode is 'queue', message is queued WITHOUT interrupt."""
         runner, sentinel = _make_runner()
@@ -638,8 +727,18 @@ class TestBusySessionAck:
         assert "10 min" not in content
 
     @pytest.mark.asyncio
-    async def test_draining_still_works(self):
+    async def test_draining_still_works(self, tmp_path, monkeypatch):
         """Draining case should still produce the drain-specific message."""
+        hermes_home = tmp_path / "draining"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            '  gateway_draining_unavailable: "再起動を待っててね♡"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         runner, sentinel = _make_runner()
         runner._draining = True
         runner._busy_input_mode = "interrupt"
@@ -658,7 +757,7 @@ class TestBusySessionAck:
 
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content", "")
-        assert "restarting" in content
+        assert content == "再起動を待っててね♡"
 
     @pytest.mark.asyncio
     async def test_pending_sentinel_no_interrupt(self):
