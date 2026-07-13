@@ -463,3 +463,20 @@ def test_other_views_not_admin_gated():
     )
     assert sc._check_auth(_interaction(11111)) is True
 
+
+def test_prompt_views_keep_their_creation_language(monkeypatch):
+    """Callback-time responses must not drift to another profile language."""
+    monkeypatch.setenv("HERMES_LANGUAGE", "ja")
+    views = (
+        ExecApprovalView(session_key="exec", allowed_user_ids={"11111"}),
+        SlashConfirmView(
+            session_key="slash",
+            confirm_id="confirm",
+            allowed_user_ids={"11111"},
+        ),
+        UpdatePromptView(session_key="update", allowed_user_ids={"11111"}),
+    )
+
+    monkeypatch.setenv("HERMES_LANGUAGE", "en")
+
+    assert {view._language for view in views} == {"ja"}

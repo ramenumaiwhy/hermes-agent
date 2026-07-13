@@ -105,6 +105,7 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from gateway.config import Platform, PlatformConfig
+from agent.i18n import get_language, t
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker, convert_table_to_bullets
 from utils import atomic_json_write, env_float, env_int
@@ -3075,7 +3076,7 @@ class DiscordAdapter(BasePlatformAdapter):
             ch = self._client.get_channel(text_ch_id)
             if ch:
                 try:
-                    await ch.send("Left voice channel (inactivity timeout).")
+                    await ch.send(t("gateway.discord.voice_inactivity_left"))
                 except Exception:
                     pass
 
@@ -3573,7 +3574,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         try:
             await interaction.response.send_message(
-                "You're not authorized to use this command.",
+                t("gateway.discord.command_unauthorized"),
                 ephemeral=True,
             )
         except Exception as e:
@@ -3620,12 +3621,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 home = runner.config.get_home_channel(target)
                 if not home or not getattr(home, "chat_id", None):
                     continue
-                msg = (
-                    "⚠️ Unauthorized Discord slash attempt\n"
-                    f"User: {user_name} ({user_id})\n"
-                    f"Channel: {chan_id} (guild {guild_id})\n"
-                    f"Command: {command_text}\n"
-                    f"Reason: {reason}"
+                msg = t(
+                    "gateway.discord.admin_unauthorized_alert",
+                    user_name=user_name,
+                    user_id=user_id,
+                    channel_id=chan_id,
+                    guild_id=guild_id,
+                    command=command_text,
+                    reason=reason,
                 )
                 result = await adapter.send(str(home.chat_id), msg)
                 # Only return on confirmed delivery. SendResult(success=False)
@@ -4531,8 +4534,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 entry = self._skill_lookup.get(name)
                 if not entry:
                     await interaction.response.send_message(
-                        f"Unknown skill: `{name}`. Start typing for "
-                        f"autocomplete suggestions.",
+                        t("gateway.discord.unknown_skill", name=name),
                         ephemeral=True,
                     )
                     return
@@ -4698,7 +4700,10 @@ class DiscordAdapter(BasePlatformAdapter):
         if not result.get("success"):
             error = result.get("error", "unknown error")
             if deferred_response:
-                await interaction.followup.send(f"Failed to create thread: {error}", ephemeral=True)
+                await interaction.followup.send(
+                    t("gateway.discord.thread_create_failed", error=error),
+                    ephemeral=True,
+                )
             return
 
         thread_id = result.get("thread_id")
@@ -4707,7 +4712,10 @@ class DiscordAdapter(BasePlatformAdapter):
         # Tell the user where the thread is
         link = f"<#{thread_id}>" if thread_id else f"**{thread_name}**"
         if deferred_response:
-            await interaction.followup.send(f"Created thread {link}", ephemeral=True)
+            await interaction.followup.send(
+                t("gateway.discord.thread_created", link=link),
+                ephemeral=True,
+            )
 
         # Track thread participation so follow-ups don't require @mention
         if thread_id:
@@ -5316,7 +5324,10 @@ class DiscordAdapter(BasePlatformAdapter):
             }
         except Exception as direct_error:
             try:
-                seed_content = starter_message or f"\U0001f9f5 Thread created by Hermes: **{name}**"
+                seed_content = starter_message or t(
+                    "gateway.discord.thread_seed_created",
+                    thread_name=name,
+                )
                 seed_msg = await parent_channel.send(seed_content)
                 thread = await seed_msg.create_thread(
                     name=name,
@@ -5388,7 +5399,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 last_direct_error = direct_error
                 try:
                     seed_msg = await message.channel.send(
-                        f"\U0001f9f5 Thread created by Hermes: **{thread_name}**"
+                        t(
+                            "gateway.discord.thread_seed_created",
+                            thread_name=thread_name,
+                        )
                     )
                     thread = await seed_msg.create_thread(
                         name=thread_name,
@@ -5542,7 +5556,9 @@ class DiscordAdapter(BasePlatformAdapter):
             send = getattr(parent, "send", None)
             if send is None:
                 return None
-            seed_msg = await send(f"\U0001f9f5 Hermes handoff: **{thread_name}**")
+            seed_msg = await send(
+                t("gateway.discord.handoff_seed", thread_name=thread_name)
+            )
             thread = await seed_msg.create_thread(
                 name=thread_name,
                 auto_archive_duration=1440,
@@ -5573,7 +5589,7 @@ class DiscordAdapter(BasePlatformAdapter):
         else:
             prefix = f"{header}\n\n"
             suffix = tail
-        truncated_suffix = "\n... [truncated]"
+        truncated_suffix = t("gateway.discord.truncated_suffix")
         budget = max(0, self.MAX_MESSAGE_LENGTH - len(prefix) - len(suffix))
         if len(body) > budget:
             body = body[: max(0, budget - len(truncated_suffix))] + truncated_suffix
@@ -5595,7 +5611,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str,
-        description: str = "dangerous command",
+        description: str = "",
         metadata: Optional[dict] = None,
     ) -> SendResult:
         """
@@ -5623,20 +5639,26 @@ class DiscordAdapter(BasePlatformAdapter):
             # command and reason must be visible in the same content block as
             # the approval buttons.
             reason_budget = 300
-            reason_display = str(description or "dangerous command")
+            truncated_suffix = t("gateway.discord.truncated_suffix")
+            reason_display = str(
+                description or t("gateway.discord.approval_default_reason")
+            )
             if len(reason_display) > reason_budget:
-                reason_display = reason_display[: reason_budget - 15] + "... [truncated]"
+                reason_display = (
+                    reason_display[: reason_budget - len(truncated_suffix)]
+                    + truncated_suffix
+                )
 
             prompt_prefix = (
-                "⚠️ **Command Approval Required**\n\n"
-                "Do you want Hermes to run this command?\n\n"
-                "**Requested command:**\n```bash\n"
+                t("gateway.discord.approval_prompt_prefix")
             )
             mention_content = self._approval_mention_content()
             if mention_content:
                 prompt_prefix = f"{mention_content}\n{prompt_prefix}"
-            prompt_tail = f"\n```\n**Reason:** {reason_display}"
-            truncated_suffix = "\n... [truncated]"
+            prompt_tail = t(
+                "gateway.discord.approval_prompt_tail",
+                reason=reason_display,
+            )
             command_budget = max(0, self.MAX_MESSAGE_LENGTH - len(prompt_prefix) - len(prompt_tail))
             content_cmd_display = str(command or "")
             if len(content_cmd_display) > command_budget:
@@ -5653,11 +5675,15 @@ class DiscordAdapter(BasePlatformAdapter):
             if len(embed_cmd_display) > max_embed_desc:
                 embed_cmd_display = embed_cmd_display[: max_embed_desc - 3] + "..."
             embed = discord.Embed(
-                title="⚠️ Command Approval Required",
+                title=t("gateway.discord.approval_title"),
                 description=f"```\n{embed_cmd_display}\n```",
                 color=discord.Color.orange(),
             )
-            embed.add_field(name="Reason", value=reason_display, inline=False)
+            embed.add_field(
+                name=t("gateway.discord.reason_label"),
+                value=reason_display,
+                inline=False,
+            )
 
             require_admin, admin_user_ids = _resolve_exec_approval_admin_gate(
                 getattr(self.config, "extra", None)
@@ -5707,15 +5733,16 @@ class DiscordAdapter(BasePlatformAdapter):
             # Embed description limit is 4096; message usually fits easily.
             max_desc = 4088
             body = message if len(message) <= max_desc else message[: max_desc - 3] + "..."
+            confirm_title = title or t("gateway.discord.confirm_title_default")
             embed = discord.Embed(
-                title=title or "Confirm",
+                title=confirm_title,
                 description=body,
                 color=discord.Color.orange(),
             )
             # Mirror the payload in plain content — embeds are invisible on
             # some clients (see send_exec_approval).
             content = self._self_contained_prompt_content(
-                f"**{title or 'Confirm'}**", message
+                f"**{confirm_title}**", message
             )
 
             view = SlashConfirmView(
@@ -5778,7 +5805,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 body = body[: max_desc - 3] + "..."
 
             embed = discord.Embed(
-                title="❓ Hermes needs your input",
+                title=t("gateway.discord.clarify_title"),
                 description=body,
                 color=discord.Color.orange(),
             )
@@ -5821,8 +5848,8 @@ class DiscordAdapter(BasePlatformAdapter):
 
             if clean_choices:
                 embed.add_field(
-                    name="Choices",
-                    value="Pick one below, or click ✏️ Other to type a custom answer.",
+                    name=t("gateway.discord.clarify_choices_label"),
+                    value=t("gateway.discord.clarify_choices_hint"),
                     inline=False,
                 )
                 view = ClarifyChoiceView(
@@ -5833,8 +5860,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
             else:
                 embed.add_field(
-                    name="Reply",
-                    value="Reply in this channel with your answer.",
+                    name=t("gateway.discord.clarify_reply_label"),
+                    value=t("gateway.discord.clarify_reply_hint"),
                     inline=False,
                 )
                 view = None
@@ -5842,12 +5869,13 @@ class DiscordAdapter(BasePlatformAdapter):
             # Mirror the question in plain content — embeds are invisible on
             # some clients (see send_exec_approval).
             clarify_tail = (
-                "\n\nPick one below, or click ✏️ Other to type a custom answer."
+                "\n\n" + t("gateway.discord.clarify_choices_hint")
                 if clean_choices
-                else "\n\nReply in this channel with your answer."
+                else "\n\n" + t("gateway.discord.clarify_reply_hint")
             )
             content = self._self_contained_prompt_content(
-                "❓ **Hermes needs your input**", str(question or "").strip(),
+                t("gateway.discord.clarify_header"),
+                str(question or "").strip(),
                 tail=clarify_tail,
             )
             msg = await channel.send(content=content, embed=embed, view=view) if view else await channel.send(content=content, embed=embed)
@@ -5876,9 +5904,13 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            default_hint = f" (default: {default})" if default else ""
+            default_hint = (
+                t("gateway.update.default_hint", default=default)
+                if default
+                else ""
+            )
             embed = discord.Embed(
-                title="⚕ Update Needs Your Input",
+                title=t("gateway.discord.update_input_title"),
                 description=f"{prompt}{default_hint}",
                 color=discord.Color.gold(),
             )
@@ -5890,7 +5922,8 @@ class DiscordAdapter(BasePlatformAdapter):
             # Mirror the prompt in plain content — embeds are invisible on
             # some clients (see send_exec_approval).
             content = self._self_contained_prompt_content(
-                "⚕ **Update Needs Your Input**", f"{prompt}{default_hint}"
+                t("gateway.discord.update_input_header"),
+                f"{prompt}{default_hint}",
             )
             msg = await channel.send(content=content, embed=embed, view=view)
             view._message = msg  # store for on_timeout expiration editing
@@ -5935,11 +5968,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 provider_label = current_provider
 
             embed = discord.Embed(
-                title="⚙ Model Configuration",
-                description=(
-                    f"Current model: `{current_model or 'unknown'}`\n"
-                    f"Provider: {provider_label}\n\n"
-                    f"Select a provider:"
+                title=t("gateway.discord.model_config_title"),
+                description=t(
+                    "gateway.discord.model_config_description",
+                    model=current_model or t("gateway.discord.model_unknown"),
+                    provider=provider_label,
                 ),
                 color=discord.Color.blue(),
             )
@@ -6277,8 +6310,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     # invocation for this message.
                     try:
                         await message.channel.send(
-                            "⚠️ Hermes could not create a Discord thread for "
-                            "this message, so the request was not processed. Please retry."
+                            t("gateway.discord.auto_thread_failed")
                         )
                     except Exception as notify_error:
                         logger.warning(
@@ -6845,6 +6877,20 @@ def _define_discord_view_classes() -> None:
     """
     global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView
 
+    def _view_t(view, key: str, **values) -> str:
+        """Translate callback-time UI copy using the view's creation profile."""
+        return t(key, lang=view._language, **values)
+
+    def _set_view_button_labels(view, labels: List[str]) -> None:
+        """Apply localized labels to decorator-created buttons in order."""
+        buttons = [
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+        ]
+        for button, label in zip(buttons, labels):
+            button.label = label
+
     class ExecApprovalView(discord.ui.View):
         """
         Interactive button view for exec approval of dangerous commands.
@@ -6864,6 +6910,7 @@ def _define_discord_view_classes() -> None:
             admin_user_ids: Optional[set] = None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
+            self._language = get_language()
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
@@ -6875,6 +6922,15 @@ def _define_discord_view_classes() -> None:
                 str(a).strip() for a in (admin_user_ids or set()) if str(a).strip()
             }
             self.resolved = False
+            _set_view_button_labels(
+                self,
+                [
+                    _view_t(self, "gateway.discord.approval_allow_once"),
+                    _view_t(self, "gateway.discord.approval_allow_session"),
+                    _view_t(self, "gateway.discord.approval_allow_always"),
+                    _view_t(self, "gateway.discord.approval_deny"),
+                ],
+            )
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             """Verify the user clicking is authorized.
@@ -6916,13 +6972,13 @@ def _define_discord_view_classes() -> None:
             """Resolve the approval via the gateway approval queue and update the embed."""
             if self.resolved:
                 await interaction.response.send_message(
-                    "This approval has already been resolved~", ephemeral=True
+                    _view_t(self, "gateway.discord.approval_resolved"), ephemeral=True
                 )
                 return
 
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized to approve commands~", ephemeral=True
+                    _view_t(self, "gateway.discord.approval_unauthorized"), ephemeral=True
                 )
                 return
 
@@ -6932,7 +6988,14 @@ def _define_discord_view_classes() -> None:
             embed = interaction.message.embeds[0] if interaction.message.embeds else None
             if embed:
                 embed.color = color
-                embed.set_footer(text=f"{label} by {interaction.user.display_name}")
+                embed.set_footer(
+                    text=_view_t(
+                        self,
+                        "gateway.discord.resolved_by",
+                        result=label,
+                        user=interaction.user.display_name,
+                    )
+                )
 
             # Disable all buttons
             for child in self.children:
@@ -6951,29 +7014,49 @@ def _define_discord_view_classes() -> None:
             except Exception as exc:
                 logger.error("Failed to resolve gateway approval from button: %s", exc)
 
-        @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
+        @discord.ui.button(label="…", style=discord.ButtonStyle.green)
         async def allow_once(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
+            await self._resolve(
+                interaction,
+                "once",
+                discord.Color.green(),
+                _view_t(self, "gateway.discord.approval_result_once"),
+            )
 
-        @discord.ui.button(label="Allow Session", style=discord.ButtonStyle.grey)
+        @discord.ui.button(label="…", style=discord.ButtonStyle.grey)
         async def allow_session(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "session", discord.Color.blue(), "Approved for session")
+            await self._resolve(
+                interaction,
+                "session",
+                discord.Color.blue(),
+                _view_t(self, "gateway.discord.approval_result_session"),
+            )
 
-        @discord.ui.button(label="Always Allow", style=discord.ButtonStyle.blurple)
+        @discord.ui.button(label="…", style=discord.ButtonStyle.blurple)
         async def allow_always(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "always", discord.Color.purple(), "Approved permanently")
+            await self._resolve(
+                interaction,
+                "always",
+                discord.Color.purple(),
+                _view_t(self, "gateway.discord.approval_result_always"),
+            )
 
-        @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
+        @discord.ui.button(label="…", style=discord.ButtonStyle.red)
         async def deny(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "deny", discord.Color.red(), "Denied")
+            await self._resolve(
+                interaction,
+                "deny",
+                discord.Color.red(),
+                _view_t(self, "gateway.discord.approval_result_denied"),
+            )
 
         async def on_timeout(self):
             """Handle view timeout -- disable buttons and mark as expired."""
@@ -6987,7 +7070,9 @@ def _define_discord_view_classes() -> None:
                     embed = msg.embeds[0] if msg.embeds else None
                     if embed:
                         embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                        embed.set_footer(
+                            text=_view_t(self, "gateway.discord.prompt_expired_footer")
+                        )
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass  # message deleted or too old to edit
@@ -7018,11 +7103,20 @@ def _define_discord_view_classes() -> None:
             allowed_role_ids: Optional[set] = None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
+            self._language = get_language()
             self.session_key = session_key
             self.confirm_id = confirm_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
+            _set_view_button_labels(
+                self,
+                [
+                    _view_t(self, "gateway.discord.confirm_approve_once"),
+                    _view_t(self, "gateway.discord.confirm_approve_always"),
+                    _view_t(self, "gateway.discord.model_cancel"),
+                ],
+            )
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
@@ -7035,12 +7129,12 @@ def _define_discord_view_classes() -> None:
         ):
             if self.resolved:
                 await interaction.response.send_message(
-                    "This prompt has already been resolved~", ephemeral=True,
+                    _view_t(self, "gateway.discord.prompt_resolved"), ephemeral=True,
                 )
                 return
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized to answer this prompt~", ephemeral=True,
+                    _view_t(self, "gateway.discord.prompt_unauthorized"), ephemeral=True,
                 )
                 return
 
@@ -7049,7 +7143,14 @@ def _define_discord_view_classes() -> None:
             embed = interaction.message.embeds[0] if interaction.message.embeds else None
             if embed:
                 embed.color = color
-                embed.set_footer(text=f"{label} by {interaction.user.display_name}")
+                embed.set_footer(
+                    text=_view_t(
+                        self,
+                        "gateway.discord.resolved_by",
+                        result=label,
+                        user=interaction.user.display_name,
+                    )
+                )
 
             for child in self.children:
                 child.disabled = True
@@ -7073,23 +7174,38 @@ def _define_discord_view_classes() -> None:
             except Exception as exc:
                 logger.error("Discord slash-confirm resolve failed: %s", exc, exc_info=True)
 
-        @discord.ui.button(label="Approve Once", style=discord.ButtonStyle.green)
+        @discord.ui.button(label="…", style=discord.ButtonStyle.green)
         async def approve_once(
             self, interaction: discord.Interaction, button: discord.ui.Button,
         ):
-            await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
+            await self._resolve(
+                interaction,
+                "once",
+                discord.Color.green(),
+                _view_t(self, "gateway.discord.approval_result_once"),
+            )
 
-        @discord.ui.button(label="Always Approve", style=discord.ButtonStyle.blurple)
+        @discord.ui.button(label="…", style=discord.ButtonStyle.blurple)
         async def approve_always(
             self, interaction: discord.Interaction, button: discord.ui.Button,
         ):
-            await self._resolve(interaction, "always", discord.Color.purple(), "Always approved")
+            await self._resolve(
+                interaction,
+                "always",
+                discord.Color.purple(),
+                _view_t(self, "gateway.discord.confirm_result_always"),
+            )
 
-        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
+        @discord.ui.button(label="…", style=discord.ButtonStyle.red)
         async def cancel(
             self, interaction: discord.Interaction, button: discord.ui.Button,
         ):
-            await self._resolve(interaction, "cancel", discord.Color.greyple(), "Cancelled")
+            await self._resolve(
+                interaction,
+                "cancel",
+                discord.Color.greyple(),
+                _view_t(self, "gateway.discord.confirm_result_cancelled"),
+            )
 
         async def on_timeout(self):
             self.resolved = True
@@ -7102,7 +7218,9 @@ def _define_discord_view_classes() -> None:
                     embed = msg.embeds[0] if msg.embeds else None
                     if embed:
                         embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                        embed.set_footer(
+                            text=_view_t(self, "gateway.discord.prompt_expired_footer")
+                        )
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
@@ -7123,10 +7241,18 @@ def _define_discord_view_classes() -> None:
             allowed_role_ids: Optional[set] = None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
+            self._language = get_language()
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
+            _set_view_button_labels(
+                self,
+                [
+                    _view_t(self, "gateway.discord.yes_label"),
+                    _view_t(self, "gateway.discord.no_label"),
+                ],
+            )
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
@@ -7139,12 +7265,12 @@ def _define_discord_view_classes() -> None:
         ):
             if self.resolved:
                 await interaction.response.send_message(
-                    "Already answered~", ephemeral=True
+                    _view_t(self, "gateway.discord.already_answered"), ephemeral=True
                 )
                 return
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized~", ephemeral=True
+                    _view_t(self, "gateway.discord.unauthorized"), ephemeral=True
                 )
                 return
 
@@ -7154,7 +7280,14 @@ def _define_discord_view_classes() -> None:
             embed = interaction.message.embeds[0] if interaction.message.embeds else None
             if embed:
                 embed.color = color
-                embed.set_footer(text=f"{label} by {interaction.user.display_name}")
+                embed.set_footer(
+                    text=_view_t(
+                        self,
+                        "gateway.discord.resolved_by",
+                        result=label,
+                        user=interaction.user.display_name,
+                    )
+                )
 
             for child in self.children:
                 child.disabled = True
@@ -7175,17 +7308,27 @@ def _define_discord_view_classes() -> None:
             except Exception as exc:
                 logger.error("Failed to write update response: %s", exc)
 
-        @discord.ui.button(label="Yes", style=discord.ButtonStyle.green, emoji="✓")
+        @discord.ui.button(label="…", style=discord.ButtonStyle.green, emoji="✓")
         async def yes_btn(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._respond(interaction, "y", discord.Color.green(), "Yes")
+            await self._respond(
+                interaction,
+                "y",
+                discord.Color.green(),
+                _view_t(self, "gateway.discord.yes_label"),
+            )
 
-        @discord.ui.button(label="No", style=discord.ButtonStyle.red, emoji="✗")
+        @discord.ui.button(label="…", style=discord.ButtonStyle.red, emoji="✗")
         async def no_btn(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._respond(interaction, "n", discord.Color.red(), "No")
+            await self._respond(
+                interaction,
+                "n",
+                discord.Color.red(),
+                _view_t(self, "gateway.discord.no_label"),
+            )
 
         async def on_timeout(self):
             self.resolved = True
@@ -7198,7 +7341,9 @@ def _define_discord_view_classes() -> None:
                     embed = msg.embeds[0] if msg.embeds else None
                     if embed:
                         embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                        embed.set_footer(
+                            text=_view_t(self, "gateway.discord.prompt_expired_footer")
+                        )
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
@@ -7222,6 +7367,7 @@ def _define_discord_view_classes() -> None:
             allowed_role_ids: Optional[set] = None,
         ):
             super().__init__(timeout=120)
+            self._language = get_language()
             self.providers = providers
             self.current_model = current_model
             self.current_provider = current_provider
@@ -7246,8 +7392,17 @@ def _define_discord_view_classes() -> None:
             options = []
             for p in self.providers:
                 count = p.get("total_models", len(p.get("models", [])))
-                label = f"{p['name']} ({count} models)"
-                desc = "current" if p.get("is_current") else None
+                label = _view_t(
+                    self,
+                    "gateway.discord.model_provider_option",
+                    provider=p["name"],
+                    count=count,
+                )
+                desc = (
+                    _view_t(self, "gateway.discord.model_current_option")
+                    if p.get("is_current")
+                    else None
+                )
                 options.append(
                     discord.SelectOption(
                         label=_truncate_discord_component_text(
@@ -7262,7 +7417,9 @@ def _define_discord_view_classes() -> None:
                 return
 
             select = discord.ui.Select(
-                placeholder="Choose a provider...",
+                placeholder=_view_t(
+                    self, "gateway.discord.model_choose_provider"
+                ),
                 options=options[:25],
                 custom_id="model_provider_select",
             )
@@ -7270,7 +7427,9 @@ def _define_discord_view_classes() -> None:
             self.add_item(select)
 
             cancel_btn = discord.ui.Button(
-                label="Cancel", style=discord.ButtonStyle.red, custom_id="model_cancel"
+                label=_view_t(self, "gateway.discord.model_cancel"),
+                style=discord.ButtonStyle.red,
+                custom_id="model_cancel",
             )
             cancel_btn.callback = self._on_cancel
             self.add_item(cancel_btn)
@@ -7304,7 +7463,11 @@ def _define_discord_view_classes() -> None:
                 return
 
             select = discord.ui.Select(
-                placeholder=f"Choose a model from {provider.get('name', provider_slug)}...",
+                placeholder=_view_t(
+                    self,
+                    "gateway.discord.model_choose_from",
+                    provider=provider.get("name", provider_slug),
+                ),
                 options=options,
                 custom_id="model_model_select",
             )
@@ -7312,13 +7475,17 @@ def _define_discord_view_classes() -> None:
             self.add_item(select)
 
             back_btn = discord.ui.Button(
-                label="◀ Back", style=discord.ButtonStyle.grey, custom_id="model_back"
+                label=_view_t(self, "gateway.discord.model_back"),
+                style=discord.ButtonStyle.grey,
+                custom_id="model_back",
             )
             back_btn.callback = self._on_back
             self.add_item(back_btn)
 
             cancel_btn = discord.ui.Button(
-                label="Cancel", style=discord.ButtonStyle.red, custom_id="model_cancel2"
+                label=_view_t(self, "gateway.discord.model_cancel"),
+                style=discord.ButtonStyle.red,
+                custom_id="model_cancel2",
             )
             cancel_btn.callback = self._on_cancel
             self.add_item(cancel_btn)
@@ -7329,7 +7496,7 @@ def _define_discord_view_classes() -> None:
             self._pending_expensive_model = model_id
 
             confirm_btn = discord.ui.Button(
-                label="Switch anyway",
+                label=_view_t(self, "gateway.discord.model_switch_anyway"),
                 style=discord.ButtonStyle.red,
                 custom_id="model_expensive_confirm",
             )
@@ -7337,7 +7504,7 @@ def _define_discord_view_classes() -> None:
             self.add_item(confirm_btn)
 
             cancel_btn = discord.ui.Button(
-                label="Cancel",
+                label=_view_t(self, "gateway.discord.model_cancel"),
                 style=discord.ButtonStyle.grey,
                 custom_id="model_expensive_cancel",
             )
@@ -7358,10 +7525,32 @@ def _define_discord_view_classes() -> None:
             except Exception:
                 return None
 
+        def _localized_expensive_warning(self, warning) -> str:
+            from hermes_cli.model_cost_guard import (
+                GPT55_PRO_OPENROUTER_ID,
+                _format_money,
+            )
+
+            suggestion = ""
+            if warning.model.lower() == GPT55_PRO_OPENROUTER_ID:
+                suggestion = "\n" + _view_t(
+                    self,
+                    "gateway.discord.model_expensive_gpt55_suggestion",
+                )
+            return _view_t(
+                self,
+                "gateway.discord.model_expensive_warning_body",
+                model=warning.model,
+                input_cost=_format_money(warning.input_cost_per_million),
+                output_cost=_format_money(warning.output_cost_per_million),
+                source=warning.source,
+                suggestion=suggestion,
+            )
+
         async def _on_provider_selected(self, interaction: discord.Interaction):
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized~", ephemeral=True
+                    _view_t(self, "gateway.discord.unauthorized"), ephemeral=True
                 )
                 return
 
@@ -7376,12 +7565,25 @@ def _define_discord_view_classes() -> None:
 
             total = provider.get("total_models", 0) if provider else 0
             shown = min(len(provider.get("models", [])), 25) if provider else 0
-            extra = f"\n*{total - shown} more available — type `/model <name>` directly*" if total > shown else ""
+            extra = (
+                _view_t(
+                    self,
+                    "gateway.discord.model_more_available",
+                    count=total - shown,
+                )
+                if total > shown
+                else ""
+            )
 
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
-                    description=f"Provider: **{pname}**\nSelect a model:{extra}",
+                    title=_view_t(self, "gateway.discord.model_config_title"),
+                    description=_view_t(
+                        self,
+                        "gateway.discord.model_provider_description",
+                        provider=pname,
+                        extra=extra,
+                    ),
                     color=discord.Color.blue(),
                 ),
                 view=self,
@@ -7394,12 +7596,12 @@ def _define_discord_view_classes() -> None:
         ):
             if self.resolved:
                 await interaction.response.send_message(
-                    "Already resolved~", ephemeral=True
+                    _view_t(self, "gateway.discord.already_resolved"), ephemeral=True
                 )
                 return
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized~", ephemeral=True
+                    _view_t(self, "gateway.discord.unauthorized"), ephemeral=True
                 )
                 return
 
@@ -7407,8 +7609,12 @@ def _define_discord_view_classes() -> None:
             self.clear_items()
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Switching Model",
-                    description=f"Switching to `{model_id}`...",
+                    title=_view_t(self, "gateway.discord.model_switching_title"),
+                    description=_view_t(
+                        self,
+                        "gateway.discord.model_switching_description",
+                        model=model_id,
+                    ),
                     color=discord.Color.blue(),
                 ),
                 view=None,
@@ -7421,11 +7627,15 @@ def _define_discord_view_classes() -> None:
                     self._selected_provider,
                 )
             except Exception as exc:
-                result_text = f"Error switching model: {exc}"
+                result_text = _view_t(
+                    self,
+                    "gateway.discord.model_switch_error",
+                    error=exc,
+                )
 
             await interaction.edit_original_response(
                 embed=discord.Embed(
-                    title="⚙ Model Switched",
+                    title=_view_t(self, "gateway.discord.model_switched_title"),
                     description=result_text,
                     color=discord.Color.green(),
                 ),
@@ -7435,12 +7645,12 @@ def _define_discord_view_classes() -> None:
         async def _on_model_selected(self, interaction: discord.Interaction):
             if self.resolved:
                 await interaction.response.send_message(
-                    "Already resolved~", ephemeral=True
+                    _view_t(self, "gateway.discord.already_resolved"), ephemeral=True
                 )
                 return
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized~", ephemeral=True
+                    _view_t(self, "gateway.discord.unauthorized"), ephemeral=True
                 )
                 return
 
@@ -7450,8 +7660,11 @@ def _define_discord_view_classes() -> None:
                 self._build_expensive_confirm(model_id)
                 await interaction.response.edit_message(
                     embed=discord.Embed(
-                        title="⚠ Expensive Model Warning",
-                        description=warning.message,
+                        title=_view_t(
+                            self,
+                            "gateway.discord.model_expensive_warning_title",
+                        ),
+                        description=self._localized_expensive_warning(warning),
                         color=discord.Color.red(),
                     ),
                     view=self,
@@ -7463,12 +7676,16 @@ def _define_discord_view_classes() -> None:
         async def _on_expensive_confirm(self, interaction: discord.Interaction):
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized~", ephemeral=True
+                    _view_t(self, "gateway.discord.unauthorized"), ephemeral=True
                 )
                 return
             if not self._pending_expensive_model:
                 await interaction.response.send_message(
-                    "Model selection expired.", ephemeral=True
+                    _view_t(
+                        self,
+                        "gateway.discord.model_selection_expired",
+                    ),
+                    ephemeral=True,
                 )
                 return
             await self._switch_selected_model(
@@ -7479,7 +7696,7 @@ def _define_discord_view_classes() -> None:
         async def _on_back(self, interaction: discord.Interaction):
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized~", ephemeral=True
+                    _view_t(self, "gateway.discord.unauthorized"), ephemeral=True
                 )
                 return
 
@@ -7493,11 +7710,13 @@ def _define_discord_view_classes() -> None:
 
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
-                    description=(
-                        f"Current model: `{self.current_model or 'unknown'}`\n"
-                        f"Provider: {provider_label}\n\n"
-                        f"Select a provider:"
+                    title=_view_t(self, "gateway.discord.model_config_title"),
+                    description=_view_t(
+                        self,
+                        "gateway.discord.model_config_description",
+                        model=self.current_model
+                        or _view_t(self, "gateway.discord.model_unknown"),
+                        provider=provider_label,
                     ),
                     color=discord.Color.blue(),
                 ),
@@ -7509,8 +7728,10 @@ def _define_discord_view_classes() -> None:
             self.clear_items()
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
-                    description="Model selection cancelled.",
+                    title=_view_t(self, "gateway.discord.model_config_title"),
+                    description=_view_t(
+                        self, "gateway.discord.model_selection_cancelled"
+                    ),
                     color=discord.Color.greyple(),
                 ),
                 view=self,
@@ -7524,8 +7745,11 @@ def _define_discord_view_classes() -> None:
             if msg:
                 try:
                     embed = discord.Embed(
-                        title="⚙ Model Configuration",
-                        description="⏱ Selection expired — no model change.",
+                        title=_view_t(self, "gateway.discord.model_config_title"),
+                        description=_view_t(
+                            self,
+                            "gateway.discord.model_selection_expired_desc",
+                        ),
                         color=discord.Color.greyple(),
                     )
                     await msg.edit(embed=embed, view=self)
@@ -7556,6 +7780,7 @@ def _define_discord_view_classes() -> None:
             allowed_role_ids: Optional[set] = None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
+            self._language = get_language()
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
@@ -7614,7 +7839,7 @@ def _define_discord_view_classes() -> None:
                 self.add_item(button)
 
             other_btn = discord.ui.Button(
-                label="✏️ Other (type answer)",
+                label=_view_t(self, "gateway.discord.clarify_other_label"),
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"clarify:{clarify_id}:other",
             )
@@ -7640,12 +7865,12 @@ def _define_discord_view_classes() -> None:
             """Resolve the clarify with a chosen option."""
             if self.resolved:
                 await interaction.response.send_message(
-                    "This prompt has already been answered~", ephemeral=True,
+                    _view_t(self, "gateway.discord.prompt_answered"), ephemeral=True,
                 )
                 return
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized to answer this prompt~", ephemeral=True,
+                    _view_t(self, "gateway.discord.prompt_unauthorized"), ephemeral=True,
                 )
                 return
 
@@ -7660,7 +7885,14 @@ def _define_discord_view_classes() -> None:
                 user = getattr(interaction, "user", None)
                 display_name = getattr(user, "display_name", "user")
                 embed.color = discord.Color.green()
-                embed.set_footer(text=f"Answered by {display_name}: {choice}")
+                embed.set_footer(
+                    text=_view_t(
+                        self,
+                        "gateway.discord.clarify_answered_footer",
+                        user=display_name,
+                        choice=choice,
+                    )
+                )
 
             try:
                 await interaction.response.edit_message(embed=embed, view=self)
@@ -7708,12 +7940,12 @@ def _define_discord_view_classes() -> None:
             """Flip the clarify entry into text-capture mode."""
             if self.resolved:
                 await interaction.response.send_message(
-                    "This prompt has already been answered~", ephemeral=True,
+                    _view_t(self, "gateway.discord.prompt_answered"), ephemeral=True,
                 )
                 return
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized to answer this prompt~", ephemeral=True,
+                    _view_t(self, "gateway.discord.prompt_unauthorized"), ephemeral=True,
                 )
                 return
 
@@ -7741,7 +7973,11 @@ def _define_discord_view_classes() -> None:
                 display_name = getattr(user, "display_name", "user")
                 embed.color = discord.Color.blue()
                 embed.set_footer(
-                    text=f"Awaiting typed response from {display_name}…",
+                    text=_view_t(
+                        self,
+                        "gateway.discord.clarify_awaiting_footer",
+                        user=display_name,
+                    ),
                 )
 
             try:
@@ -7763,7 +7999,9 @@ def _define_discord_view_classes() -> None:
                     embed = msg.embeds[0] if msg.embeds else None
                     if embed:
                         embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
+                        embed.set_footer(
+                            text=_view_t(self, "gateway.discord.prompt_expired_footer")
+                        )
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass

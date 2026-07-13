@@ -205,6 +205,50 @@ async def test_run_process_watcher_respects_notification_mode(
 
 
 @pytest.mark.asyncio
+async def test_process_completion_uses_exact_soul_status_copy(
+    monkeypatch, tmp_path,
+):
+    """Persona copy comes from SOUL while process output stays unchanged."""
+    import tools.process_registry as pr_module
+
+    (tmp_path / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  background_process_finished: "{session_id}が終わったよ♡（{exit_code}）"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        pr_module,
+        "process_registry",
+        _FakeRegistry(
+            [
+                SimpleNamespace(
+                    output_buffer="literal {session_id}\n",
+                    exited=True,
+                    exit_code=0,
+                )
+            ]
+        ),
+    )
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    watcher = _watcher_dict(session_id="proc_soul")
+    watcher["session_key"] = "agent:main:telegram:dm:123"
+    await runner._run_process_watcher(watcher)
+
+    sent_message = adapter.send.await_args.args[1]
+    assert sent_message == "proc_soulが終わったよ♡（0）\nliteral {session_id}\n"
+
+
+@pytest.mark.asyncio
 async def test_thread_id_passed_to_send(monkeypatch, tmp_path):
     """thread_id from watcher dict is forwarded as metadata to adapter.send()."""
     import tools.process_registry as pr_module
@@ -284,6 +328,35 @@ async def test_inject_watch_notification_routes_from_session_store_origin(monkey
 
 
 @pytest.mark.asyncio
+async def test_inject_watch_notification_uses_named_profile_adapter(
+    monkeypatch, tmp_path,
+):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    default_adapter = runner.adapters[Platform.TELEGRAM]
+    profile_adapter = SimpleNamespace(
+        send=AsyncMock(),
+        handle_message=AsyncMock(),
+    )
+    runner.config.multiplex_profiles = True
+    runner._profile_adapters = {
+        "coder": {Platform.TELEGRAM: profile_adapter},
+    }
+
+    await runner._inject_watch_notification(
+        "[SYSTEM: profile completion]",
+        {
+            "session_id": "proc_profile",
+            "session_key": "agent:coder:telegram:dm:123",
+        },
+    )
+
+    profile_adapter.handle_message.assert_awaited_once()
+    default_adapter.handle_message.assert_not_awaited()
+    synth_event = profile_adapter.handle_message.await_args.args[0]
+    assert synth_event.source.profile == "coder"
+
+
+@pytest.mark.asyncio
 async def test_agent_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
     """notify_on_complete injection carries the triggering message_id so the
     synthetic event can be reply-anchored back into a Telegram DM topic.
@@ -358,6 +431,43 @@ async def test_agent_notification_no_message_id_is_tolerated(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_agent_completion_uses_named_profile_adapter(monkeypatch, tmp_path):
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="done\n", exited=True, exit_code=0, command="sleep 1",
+    )]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    default_adapter = runner.adapters[Platform.TELEGRAM]
+    profile_adapter = SimpleNamespace(
+        send=AsyncMock(),
+        handle_message=AsyncMock(),
+    )
+    runner.config.multiplex_profiles = True
+    runner._profile_adapters = {
+        "coder": {Platform.TELEGRAM: profile_adapter},
+    }
+
+    await runner._run_process_watcher({
+        "session_id": "proc_profile_complete",
+        "check_interval": 0,
+        "session_key": "agent:coder:telegram:dm:123",
+        "platform": "telegram",
+        "chat_id": "123",
+        "notify_on_complete": True,
+    })
+
+    profile_adapter.handle_message.assert_awaited_once()
+    default_adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_inject_watch_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
     from gateway.session import SessionSource
 
@@ -410,6 +520,20 @@ def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypa
     assert source.thread_id == "42"
     assert source.user_id == "123"
     assert source.user_name == "Emiliyan"
+
+
+def test_build_process_event_source_restores_named_profile(monkeypatch, tmp_path):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+
+    source = runner._build_process_event_source({
+        "session_id": "proc_profile",
+        "session_key": "agent:coder:telegram:dm:123",
+        "platform": "telegram",
+        "chat_id": "123",
+    })
+
+    assert source is not None
+    assert source.profile == "coder"
 
 
 def test_build_process_event_source_uses_cached_live_source_before_session_key_parse(
@@ -548,6 +672,16 @@ def test_parse_session_key_thread_chat_type():
     assert result == {"platform": "discord", "chat_type": "thread", "chat_id": "chan1", "thread_id": "thread99"}
 
 
+def test_parse_session_key_preserves_named_profile():
+    result = _parse_session_key("agent:coder:telegram:dm:chat1")
+    assert result == {
+        "platform": "telegram",
+        "chat_type": "dm",
+        "chat_id": "chat1",
+        "profile": "coder",
+    }
+
+
 def test_parse_session_key_too_short():
     assert _parse_session_key("agent:main:telegram") is None
     assert _parse_session_key("") is None
@@ -555,4 +689,4 @@ def test_parse_session_key_too_short():
 
 def test_parse_session_key_wrong_prefix():
     assert _parse_session_key("cron:main:telegram:dm:123") is None
-    assert _parse_session_key("agent:cron:telegram:dm:123") is None
+    assert _parse_session_key("agent:Bad!:telegram:dm:123") is None

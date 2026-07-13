@@ -121,8 +121,43 @@ def test_default_when_nothing_set(monkeypatch):
     monkeypatch.delenv("HERMES_LANGUAGE", raising=False)
     # Force config lookup to return None -- patch the cached reader.
     i18n.reset_language_cache()
-    monkeypatch.setattr(i18n, "_config_language_cached", lambda: None)
+    monkeypatch.setattr(i18n, "_config_language_cached", lambda *_args: None)
     assert i18n.get_language() == "en"
+
+
+def test_config_language_cache_is_scoped_by_profile_home(tmp_path, monkeypatch):
+    """Multiplexed profiles keep independent display languages."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.delenv("HERMES_LANGUAGE", raising=False)
+    ja_home = tmp_path / "ja"
+    de_home = tmp_path / "de"
+    ja_home.mkdir()
+    de_home.mkdir()
+    (ja_home / "config.yaml").write_text(
+        "display:\n  language: ja\n",
+        encoding="utf-8",
+    )
+    (de_home / "config.yaml").write_text(
+        "display:\n  language: de\n",
+        encoding="utf-8",
+    )
+    i18n.reset_language_cache()
+
+    try:
+        ja_token = set_hermes_home_override(ja_home)
+        try:
+            assert i18n.get_language() == "ja"
+        finally:
+            reset_hermes_home_override(ja_token)
+
+        de_token = set_hermes_home_override(de_home)
+        try:
+            assert i18n.get_language() == "de"
+        finally:
+            reset_hermes_home_override(de_token)
+    finally:
+        i18n.reset_language_cache()
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ installed its own mock at module-import time and clobbered sys.modules,
 breaking other gateway tests under pytest-xdist.
 """
 
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -135,6 +136,33 @@ def test_model_picker_model_labels_and_values_fit_discord_utf16_limit():
     assert utf16_len(option.value) <= 100
 
 
+def test_model_picker_uses_creation_language(monkeypatch):
+    monkeypatch.setenv("HERMES_LANGUAGE", "ja")
+
+    view = ModelPickerView(
+        providers=[
+            {
+                "slug": "openai",
+                "name": "OpenAI",
+                "models": ["gpt-5.4"],
+                "total_models": 1,
+                "is_current": True,
+            }
+        ],
+        current_model="gpt-5.4",
+        current_provider="openai",
+        session_key="session-ja",
+        on_model_selected=AsyncMock(return_value="ok"),
+        allowed_user_ids={"123"},
+    )
+
+    provider_select, cancel_button = view.children
+    assert provider_select.placeholder == "プロバイダーを選んでください..."
+    assert provider_select.options[0].label == "OpenAI（1モデル）"
+    assert provider_select.options[0].description == "現在使用中"
+    assert cancel_button.label == "キャンセル"
+
+
 @pytest.mark.asyncio
 async def test_expensive_model_requires_confirmation(monkeypatch):
     events: list[object] = []
@@ -164,7 +192,10 @@ async def test_expensive_model_requires_confirmation(monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.model_cost_guard.expensive_model_warning",
         lambda *_args, **_kwargs: SimpleNamespace(
-            message="!!! EXPENSIVE MODEL WARNING !!!\ndid you mean to select openai/gpt-5.5?"
+            model="openai/gpt-5.5-pro",
+            input_cost_per_million=Decimal("25"),
+            output_cost_per_million=Decimal("150"),
+            source="models.dev",
         ),
     )
 
@@ -203,7 +234,14 @@ async def test_expensive_model_requires_confirmation(monkeypatch):
         (
             "edit",
             "⚠ Expensive Model Warning",
-            "!!! EXPENSIVE MODEL WARNING !!!\ndid you mean to select openai/gpt-5.5?",
+            "!!! EXPENSIVE MODEL WARNING !!!\n\n"
+            "openai/gpt-5.5-pro has known pricing above Hermes' safety threshold.\n"
+            "Input tokens: $25.00/M\n"
+            "Output tokens: $150.00/M\n"
+            "Threshold: more than $20/M input tokens or more than $100/M output tokens.\n"
+            "Pricing source: models.dev.\n"
+            "Did you mean to select openai/gpt-5.5?\n"
+            "Confirm only if you intend to use this model.",
             view,
         ),
     ]
