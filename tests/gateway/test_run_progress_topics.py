@@ -145,6 +145,30 @@ class FakeAgent:
         }
 
 
+class SoulProgressAgent:
+    """Agent that emits a file read with real args for SOUL label coverage."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb(
+                "tool.started",
+                "read_file",
+                "search-second-brain.sh L1-220",
+                {"path": "/tmp/search-second-brain.sh", "offset": 1, "limit": 220},
+            )
+            time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class ThinkingAgent:
     """Agent that emits _thinking scratch text (no tool calls).
 
@@ -494,6 +518,53 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
 # ---------------------------------------------------------------------------
 # Preview truncation tests (all/new mode respects tool_preview_length)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gateway_progress_uses_soul_label(monkeypatch, tmp_path):
+    """Discord-style progress uses the same SOUL persona label as the CLI."""
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "SOUL.md").write_text(
+        "---\n"
+        "tool_progress_labels:\n"
+        "  read_file: \"{preview}、ちゃんと読んでるよ〜♡\"\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = SoulProgressAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    adapter = ProgressCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="himeno-progress",
+        chat_type="group",
+        thread_id=None,
+    )
+    result = await runner._run_agent(
+        message="read the file",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-soul-progress",
+        session_key="agent:main:discord:group:himeno-progress",
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent
+    assert "search-second-brain.sh L1-220、ちゃんと読んでるよ〜♡" in adapter.sent[0]["content"]
 
 
 def _extract_progress_preview(content: str) -> str | None:
@@ -1525,6 +1596,37 @@ async def test_terminal_progress_verbose_shows_full_command(monkeypatch, tmp_pat
     # Full command body present — verbose is uncapped.
     assert "npm install -g hyperframes@latest" in all_content
     assert "node --version" in all_content
+
+
+@pytest.mark.parametrize("mode", ["all", "verbose"])
+@pytest.mark.asyncio
+async def test_terminal_code_block_uses_soul_label(monkeypatch, tmp_path, mode):
+    """Markdown terminal headers retain SOUL persona copy in every mode."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "SOUL.md").write_text(
+        "---\n"
+        "tool_progress_labels:\n"
+        "  terminal: \"{preview}、私に任せてね♡\"\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TerminalCommandAgent,
+        session_id=f"sess-terminal-soul-{mode}",
+        config_data={"display": {"tool_progress": mode}},
+        platform=Platform.DISCORD,
+        chat_id="himeno-terminal",
+        thread_id=None,
+        adapter_cls=CodeBlockProgressAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    all_content = " ".join(call["content"] for call in adapter.sent)
+    all_content += " ".join(call["content"] for call in adapter.edits)
+    assert "私に任せてね♡" in all_content
+    assert "```" in all_content
 
 
 @pytest.mark.asyncio

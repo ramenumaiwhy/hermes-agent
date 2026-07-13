@@ -609,6 +609,70 @@ _TOOL_VERBS_FOR_CONNECTOR: frozenset[str] = frozenset({
 
 _friendly_tool_labels: bool = True
 
+# Optional per-persona tool labels live in SOUL.md frontmatter so display copy
+# stays attached to the identity it represents.  The cache is keyed by the
+# profile-aware path and mtime; editing SOUL.md is therefore picked up without
+# making every progress event parse YAML again.
+_soul_tool_labels_cache_key: tuple[str, int] | None = None
+_soul_tool_labels_cache: dict[str, str] = {}
+
+
+def _load_soul_tool_labels() -> dict[str, str]:
+    """Load optional ``tool_progress_labels`` from SOUL.md frontmatter."""
+    global _soul_tool_labels_cache_key, _soul_tool_labels_cache
+
+    try:
+        from hermes_constants import get_hermes_home
+
+        path = get_hermes_home() / "SOUL.md"
+        mtime_ns = path.stat().st_mtime_ns
+    except (ImportError, OSError):
+        return {}
+
+    cache_key = (str(path), mtime_ns)
+    if cache_key == _soul_tool_labels_cache_key:
+        return _soul_tool_labels_cache
+
+    labels: dict[str, str] = {}
+    try:
+        from agent.skill_utils import parse_frontmatter
+
+        text = path.read_text(encoding="utf-8")
+        frontmatter, _body = parse_frontmatter(text)
+        raw_labels = frontmatter.get("tool_progress_labels")
+        if isinstance(raw_labels, dict):
+            labels = {
+                str(name): value
+                for name, value in raw_labels.items()
+                if isinstance(value, str) and value.strip()
+            }
+    except Exception as exc:  # noqa: BLE001 — cosmetic config must not break tools
+        logger.debug("Could not load SOUL.md tool progress labels: %s", exc)
+
+    _soul_tool_labels_cache_key = cache_key
+    _soul_tool_labels_cache = labels
+    return labels
+
+
+def build_soul_tool_label(
+    tool_name: str,
+    args: dict,
+    max_len: int | None = None,
+    preview: str | None = None,
+) -> str | None:
+    """Render a SOUL-defined label, replacing only the safe preview token."""
+    if not _friendly_tool_labels:
+        return None
+    template = _load_soul_tool_labels().get(tool_name)
+    if not template:
+        return None
+    resolved_preview = (
+        _truncate_preview(preview, max_len)
+        if preview is not None
+        else build_tool_preview(tool_name, args, max_len=max_len) or ""
+    )
+    return template.replace("{preview}", resolved_preview).strip()
+
 
 def set_friendly_tool_labels(enabled: bool) -> None:
     """Toggle friendly human-phrased tool labels (display.friendly_tool_labels)."""
@@ -644,7 +708,12 @@ def verb_drops_preview(tool_name: str) -> bool:
     return tool_name in _TOOL_VERBS_NO_PREVIEW
 
 
-def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
+def build_tool_label(
+    tool_name: str,
+    args: dict,
+    max_len: int | None = None,
+    preview: str | None = None,
+) -> str | None:
     """Build a human-phrased status label for a tool call.
 
     For built-in tools with a known verb (``web_search`` -> "Searching the
@@ -653,22 +722,33 @@ def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> 
     labels are disabled) returns the raw preview, so callers can use this as a
     drop-in replacement for :func:`build_tool_preview`.
     """
+    resolved_preview = (
+        _truncate_preview(preview, max_len)
+        if preview is not None
+        else build_tool_preview(tool_name, args, max_len=max_len)
+    )
+
     if not _friendly_tool_labels:
-        return build_tool_preview(tool_name, args, max_len=max_len)
+        return resolved_preview
+
+    soul_label = build_soul_tool_label(
+        tool_name, args, max_len=max_len, preview=resolved_preview,
+    )
+    if soul_label:
+        return soul_label
 
     verb = _TOOL_VERBS.get(tool_name)
     if not verb:
-        return build_tool_preview(tool_name, args, max_len=max_len)
+        return resolved_preview
 
     if tool_name in _TOOL_VERBS_NO_PREVIEW:
         return verb
 
-    preview = build_tool_preview(tool_name, args, max_len=max_len)
-    if not preview:
+    if not resolved_preview:
         return verb
     if tool_name in _TOOL_VERBS_FOR_CONNECTOR:
-        return f"{verb} for {preview}"
-    return f"{verb} {preview}"
+        return f"{verb} for {resolved_preview}"
+    return f"{verb} {resolved_preview}"
 
 
 # =========================================================================
@@ -1304,6 +1384,11 @@ def _get_cute_tool_message(
             return line
         return f"{line}{failure_suffix}"
 
+    soul_label = build_soul_tool_label(tool_name, args)
+    if soul_label:
+        emoji = get_tool_emoji(tool_name)
+        return _wrap(f"┊ {emoji} {soul_label}  {dur}")
+
     if tool_name == "web_search":
         return _wrap(f"┊ 🔍 search    {_trunc(args.get('query', ''), 42)}  {dur}")
     if tool_name == "web_extract":
@@ -1459,5 +1544,3 @@ def get_cute_tool_message(
 # =========================================================================
 # Honcho session line (one-liner with clickable OSC 8 hyperlink)
 # =========================================================================
-
-

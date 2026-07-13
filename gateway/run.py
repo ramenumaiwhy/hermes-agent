@@ -17332,8 +17332,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             last_tool[0] = tool_name
 
             # Build progress message with primary argument preview
-            from agent.display import get_tool_emoji
+            from agent.display import (
+                build_soul_tool_label,
+                get_tool_emoji,
+                get_tool_preview_max_len,
+            )
             emoji = get_tool_emoji(tool_name, default="⚙️")
+            _pl = get_tool_preview_max_len()
+            _label_cap = _pl if _pl > 0 else 40
+            _soul_label = build_soul_tool_label(
+                tool_name, args or {}, max_len=_label_cap, preview=preview,
+            )
 
             # Markdown-capable platforms render a terminal command as a fenced
             # code block instead of the compact `terminal: "cmd…"` preview.
@@ -17361,13 +17370,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and isinstance(args.get("command"), str)
                 and args["command"].strip()
             ):
-                from agent.display import get_tool_preview_max_len
                 _cmd_full = args["command"].rstrip()
                 # Consecutive terminal calls: drop the repeated
                 # "💻 terminal" header so back-to-back commands render as
                 # adjacent code blocks under a single header.
                 _block_header = (
-                    "" if last_was_terminal_block[0] else f"{emoji} {tool_name}\n"
+                    ""
+                    if last_was_terminal_block[0]
+                    else f"{emoji} {_soul_label or tool_name}\n"
                 )
                 _code_block_full = f"{_block_header}```\n{_cmd_full}\n```"
                 # Single-line, capped preview for non-verbose modes.
@@ -17390,19 +17400,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
                 last_was_terminal_block[0] = False
                 if args:
-                    from agent.display import get_tool_preview_max_len
-                    _pl = get_tool_preview_max_len()
                     args_str = json.dumps(args, ensure_ascii=False, default=str)
                     # When tool_preview_length is 0 (default), don't truncate
                     # in verbose mode — the user explicitly asked for full
                     # detail.  Platform message-length limits handle the rest.
                     if _pl > 0 and len(args_str) > _pl:
                         args_str = args_str[:_pl - 3] + "..."
-                    msg = f"{emoji} {tool_name}({list(args.keys())})\n{args_str}"
+                    detail = f"{tool_name}({list(args.keys())})\n{args_str}"
+                    msg = f"{emoji} {_soul_label}\n{detail}" if _soul_label else f"{emoji} {detail}"
                 elif preview:
-                    msg = f"{emoji} {tool_name}: \"{preview}\""
+                    detail = f'{tool_name}: "{preview}"'
+                    msg = f"{emoji} {_soul_label}\n{detail}" if _soul_label else f"{emoji} {detail}"
                 else:
-                    msg = f"{emoji} {tool_name}..."
+                    msg = f"{emoji} {_soul_label or tool_name}..."
                 progress_queue.put(msg)
                 return
             
@@ -17416,26 +17426,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 last_was_terminal_block[0] = True
             elif preview:
                 from agent.display import (
-                    get_tool_preview_max_len,
-                    get_tool_verb,
-                    tool_verb_connector,
-                    verb_drops_preview,
+                    build_tool_label,
                 )
-                _pl = get_tool_preview_max_len()
                 _cap = _pl if _pl > 0 else 40
                 if len(preview) > _cap:
                     preview = preview[:_cap - 3] + "..."
-                # Friendly labels: render a human-phrased line for built-in
-                # tools ("🔍 Searching the web for ...") by prefixing the verb
-                # onto the preview the callback already computed (so the
-                # command/url/query is preserved).  Custom/plugin/MCP tools
-                # have no verb and fall back to the raw "tool_name: ..." form.
-                _verb = get_tool_verb(tool_name)
-                if _verb:
-                    if verb_drops_preview(tool_name):
-                        msg = f"{emoji} {_verb}"
-                    else:
-                        msg = f"{emoji} {_verb}{tool_verb_connector(tool_name)}{preview}"
+                # Reuse the common label builder so SOUL-defined persona copy,
+                # built-in friendly verbs, and callback-provided previews stay
+                # identical across CLI, gateway, TUI, and desktop surfaces.
+                _label = build_tool_label(
+                    tool_name, args or {}, max_len=_cap, preview=preview,
+                )
+                if _label and _label != preview:
+                    msg = f"{emoji} {_label}"
                 else:
                     msg = f"{emoji} {tool_name}: \"{preview}\""
                 last_was_terminal_block[0] = False

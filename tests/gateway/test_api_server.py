@@ -1351,9 +1351,19 @@ class TestChatCompletionsEndpoint:
                 assert " about it..." in body
 
     @pytest.mark.asyncio
-    async def test_stream_includes_tool_progress(self, adapter):
+    async def test_stream_includes_tool_progress(self, adapter, tmp_path, monkeypatch):
         """tool_start_callback fires → progress appears as custom SSE event, not in delta.content."""
         import asyncio
+        import json as _json
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "SOUL.md").write_text(
+            "---\n"
+            "tool_progress_labels:\n"
+            "  terminal: \"{preview}、私に任せてね♡\"\n"
+            "---\n",
+            encoding="utf-8",
+        )
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
@@ -1388,13 +1398,23 @@ class TestChatCompletionsEndpoint:
                 # markers instead of calling tools (#6972).
                 assert "event: hermes.tool.progress" in body
                 assert '"tool": "terminal"' in body
-                # ``label`` is now derived by ``build_tool_preview`` from the
-                # tool args rather than passed by the caller, so we assert
-                # only that *some* label exists rather than a literal value.
+                progress_payloads = []
+                for line in body.splitlines():
+                    if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                        continue
+                    try:
+                        payload = _json.loads(line[len("data: "):])
+                    except _json.JSONDecodeError:
+                        continue
+                    if payload.get("tool") == "terminal":
+                        progress_payloads.append(payload)
+                assert progress_payloads[0]["label"] == "ls -la、私に任せてね♡"
+                # ``label`` is derived by the shared friendly/SOUL label
+                # builder from tool args rather than passed by the caller, so
+                # assert only that some label exists rather than a literal.
                 assert '"label":' in body
                 # The progress marker must NOT appear inside any
                 # chat.completion.chunk delta.content field.
-                import json as _json
                 for line in body.splitlines():
                     if line.startswith("data: ") and line.strip() != "data: [DONE]":
                         try:
@@ -1447,7 +1467,7 @@ class TestChatCompletionsEndpoint:
                 # Real tool progress should appear as custom SSE event
                 assert "event: hermes.tool.progress" in body
                 assert '"tool": "web_search"' in body
-                # Label is derived from the args dict by build_tool_preview;
+                # Label is derived from the args dict by build_tool_label;
                 # asserting on the structural fact (label exists, call id
                 # is correlated) rather than a literal preview string keeps
                 # the test robust against preview-formatter tweaks.

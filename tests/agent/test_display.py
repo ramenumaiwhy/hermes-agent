@@ -1,6 +1,7 @@
 """Tests for agent/display.py — build_tool_preview() and inline diff previews."""
 
 import json
+import os
 import pytest
 from unittest.mock import MagicMock
 
@@ -486,9 +487,124 @@ class TestBuildToolLabel:
         assert label == build_tool_preview("web_search", args)
         assert "Searching the web" not in (label or "")
 
+    def test_disabled_suppresses_direct_soul_label(self, tmp_path, monkeypatch):
+        from agent.display import build_soul_tool_label, set_friendly_tool_labels
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "tool_progress_labels:\n"
+            '  read_file: "{preview} sweet"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        set_friendly_tool_labels(False)
+
+        assert build_soul_tool_label("read_file", {"path": "note.md"}) is None
+
     def test_every_known_verb_renders_without_error(self):
         from agent.display import build_tool_label, _TOOL_VERBS
         # Each built-in verb must produce a non-empty label given minimal args.
         for tool_name in _TOOL_VERBS:
             label = build_tool_label(tool_name, {"query": "x", "path": "x", "url": "x"})
             assert label, f"{tool_name} produced empty label"
+
+    def test_soul_frontmatter_overrides_builtin_label(self, tmp_path, monkeypatch):
+        from agent.display import build_tool_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "tool_progress_labels:\n"
+            "  read_file: \"{preview}、ちゃんと読んでるよ〜♡\"\n"
+            "  session_search: \"大事な記憶、思い出してるよ〜♡\"\n"
+            "---\n"
+            "# ひめの\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_tool_label("read_file", {"path": "/tmp/note.md"}) == (
+            "note.md、ちゃんと読んでるよ〜♡"
+        )
+        assert build_tool_label("session_search", {"query": "secret"}) == (
+            "大事な記憶、思い出してるよ〜♡"
+        )
+
+    def test_soul_label_accepts_callback_preview(self, tmp_path, monkeypatch):
+        from agent.display import build_tool_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "tool_progress_labels:\n"
+            "  search_files: \"{preview}、探してるよ♡\"\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_tool_label(
+            "search_files", {}, max_len=40, preview="ひめの|Himeno",
+        ) == "ひめの|Himeno、探してるよ♡"
+
+    def test_soul_frontmatter_accepts_windows_newlines(self, tmp_path, monkeypatch):
+        from agent.display import build_tool_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_bytes(
+            b'---\r\ntool_progress_labels:\r\n  read_file: "{preview} sweet"\r\n---\r\n'
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_tool_label("read_file", {"path": "note.md"}) == "note.md sweet"
+
+    def test_soul_without_progress_labels_keeps_builtin_label(self, tmp_path, monkeypatch):
+        from agent.display import build_tool_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text("# Another persona\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_tool_label("search_files", {"pattern": "TODO"}) == (
+            "Searching files for TODO"
+        )
+
+    def test_soul_label_change_is_reloaded(self, tmp_path, monkeypatch):
+        from agent.display import build_tool_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        soul_path = hermes_home / "SOUL.md"
+        soul_path.write_text(
+            "---\n"
+            "tool_progress_labels:\n"
+            "  read_file: \"{preview}を読んでるよ♡\"\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_tool_label("read_file", {"path": "/tmp/note.md"}) == (
+            "note.mdを読んでるよ♡"
+        )
+
+        old_mtime_ns = soul_path.stat().st_mtime_ns
+        soul_path.write_text(
+            "---\n"
+            "tool_progress_labels:\n"
+            "  read_file: \"{preview}を大事に読んでるよ💕\"\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        os.utime(soul_path, ns=(old_mtime_ns + 1_000_000, old_mtime_ns + 1_000_000))
+
+        assert build_tool_label("read_file", {"path": "/tmp/note.md"}) == (
+            "note.mdを大事に読んでるよ💕"
+        )
