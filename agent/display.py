@@ -696,6 +696,8 @@ def build_soul_tool_label(
 def build_soul_status_label(
     status_name: str,
     values: dict[str, Any] | None = None,
+    *,
+    allow_default: bool = True,
 ) -> str | None:
     """Render a SOUL-defined non-tool progress label.
 
@@ -704,7 +706,9 @@ def build_soul_status_label(
     fallback instead of leaking a half-rendered template into chat.
     """
     labels = _load_soul_status_labels()
-    template = labels.get(status_name) or labels.get("default")
+    template = labels.get(status_name)
+    if not template and allow_default:
+        template = labels.get("default")
     if not template:
         return None
 

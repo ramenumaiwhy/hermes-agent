@@ -28,6 +28,27 @@ from agent.thread_scoped_output import thread_scoped_silence
 logger = logging.getLogger(__name__)
 
 
+def _soul_review_copy(
+    status_name: str,
+    values: Dict[str, Any],
+    fallback: str,
+) -> str:
+    """Render optional persona-owned self-improvement copy from SOUL.md."""
+    try:
+        from agent.display import build_soul_status_label
+
+        rendered = build_soul_status_label(
+            status_name,
+            values,
+            allow_default=False,
+        )
+        if rendered:
+            return rendered
+    except Exception:
+        logger.debug("Could not render SOUL self-improvement copy", exc_info=True)
+    return fallback
+
+
 # ---------------------------------------------------------------------------
 # Background-review aux-model selector + routed digest.
 #
@@ -480,13 +501,25 @@ def summarize_background_review_actions(
         message_lower = message.lower()
         if not verbose:
             if "created" in message_lower:
-                actions.append(message)
+                actions.append(_soul_review_copy(
+                    "self_improvement_skill_updated" if is_skill else "self_improvement_item_updated",
+                    {"message": message, "skill_name": detail.get("name", "")},
+                    message,
+                ))
                 continue
             if "updated" in message_lower:
-                actions.append(message)
+                actions.append(_soul_review_copy(
+                    "self_improvement_skill_updated" if is_skill else "self_improvement_item_updated",
+                    {"message": message, "skill_name": detail.get("name", "")},
+                    message,
+                ))
                 continue
             if is_skill and "patched" in message_lower:
-                actions.append(message)
+                actions.append(_soul_review_copy(
+                    "self_improvement_skill_updated",
+                    {"message": message, "skill_name": detail.get("name", "")},
+                    message,
+                ))
                 continue
 
         if is_skill:
@@ -533,16 +566,44 @@ def summarize_background_review_actions(
                     new_preview = new_string[:80].replace("\n", " ") + (
                         "…" if len(new_string) > 80 else ""
                     )
-                    actions.append(
+                    fallback = (
                         f"📝 Skill '{skill_name}' patched: "
                         f"\"{old_preview}\" → \"{new_preview}\""
                     )
+                    actions.append(_soul_review_copy(
+                        "self_improvement_skill_patched",
+                        {
+                            "skill_name": skill_name,
+                            "old_preview": old_preview,
+                            "new_preview": new_preview,
+                        },
+                        fallback,
+                    ))
                 elif action == "create" and description:
-                    actions.append(f"📝 Skill '{skill_name}' created: {description}")
+                    fallback = f"📝 Skill '{skill_name}' created: {description}"
+                    actions.append(_soul_review_copy(
+                        "self_improvement_skill_created",
+                        {"skill_name": skill_name, "description": description},
+                        fallback,
+                    ))
                 elif action == "edit" and description:
-                    actions.append(f"📝 Skill '{skill_name}' rewritten: {description}")
+                    fallback = f"📝 Skill '{skill_name}' rewritten: {description}"
+                    actions.append(_soul_review_copy(
+                        "self_improvement_skill_rewritten",
+                        {"skill_name": skill_name, "description": description},
+                        fallback,
+                    ))
                 else:
-                    actions.append(f"📝 {message}" if message else f"Skill {action}")
+                    fallback = f"📝 {message}" if message else f"Skill {action}"
+                    actions.append(_soul_review_copy(
+                        "self_improvement_skill_updated",
+                        {
+                            "action": action,
+                            "message": message,
+                            "skill_name": skill_name,
+                        },
+                        fallback,
+                    ))
             elif operations:
                 for op in operations:
                     # Each element must be a dict-of-fields; some
@@ -557,24 +618,53 @@ def summarize_background_review_actions(
                     op_old = (op.get("old_text") or "")
                     if op_act == "add" and op_content:
                         preview = op_content[:max_preview] + ("…" if len(op_content) > max_preview else "")
-                        actions.append(f"{label} ➕ {preview}")
+                        actions.append(_soul_review_copy(
+                            "self_improvement_item_added",
+                            {"preview": preview, "target": target},
+                            f"{label} ➕ {preview}",
+                        ))
                     elif op_act == "replace" and op_content:
                         preview = op_content[:max_preview] + ("…" if len(op_content) > max_preview else "")
-                        actions.append(f"{label} ✏️ {preview}")
+                        actions.append(_soul_review_copy(
+                            "self_improvement_item_replaced",
+                            {"preview": preview, "target": target},
+                            f"{label} ✏️ {preview}",
+                        ))
                     elif op_act == "remove" and op_old:
                         preview = op_old[:60] + ("…" if len(op_old) > 60 else "")
-                        actions.append(f"{label} ➖ {preview}")
+                        actions.append(_soul_review_copy(
+                            "self_improvement_item_removed",
+                            {"preview": preview, "target": target},
+                            f"{label} ➖ {preview}",
+                        ))
             elif action == "add" and content:
                 preview = content[:max_preview] + ("…" if len(content) > max_preview else "")
-                actions.append(f"{label} ➕ {preview}")
+                actions.append(_soul_review_copy(
+                    "self_improvement_item_added",
+                    {"preview": preview, "target": target},
+                    f"{label} ➕ {preview}",
+                ))
             elif action == "replace" and content:
                 preview = content[:max_preview] + ("…" if len(content) > max_preview else "")
-                actions.append(f"{label} ✏️ {preview}")
+                actions.append(_soul_review_copy(
+                    "self_improvement_item_replaced",
+                    {"preview": preview, "target": target},
+                    f"{label} ✏️ {preview}",
+                ))
             elif action == "remove" and old_text:
                 preview = old_text[:60] + ("…" if len(old_text) > 60 else "")
-                actions.append(f"{label} ➖ {preview}")
+                actions.append(_soul_review_copy(
+                    "self_improvement_item_removed",
+                    {"preview": preview, "target": target},
+                    f"{label} ➖ {preview}",
+                ))
             else:
-                actions.append(f"{label} updated")
+                fallback = f"{label} updated"
+                actions.append(_soul_review_copy(
+                    "self_improvement_item_updated",
+                    {"target": target},
+                    fallback,
+                ))
         elif (
             "added" in message_lower
             or "replaced" in message_lower
@@ -583,7 +673,12 @@ def summarize_background_review_actions(
             or (target and "add" in message.lower())
             or "Entry added" in message
         ):
-            actions.append(f"{label} updated")
+            fallback = f"{label} updated"
+            actions.append(_soul_review_copy(
+                "self_improvement_item_updated",
+                {"target": target},
+                fallback,
+            ))
     return actions
 
 
@@ -898,15 +993,18 @@ def _run_review_in_thread(
 
         if actions:
             summary = " · ".join(dict.fromkeys(actions))
+            notification = _soul_review_copy(
+                "self_improvement_review",
+                {"summary": summary},
+                f"💾 Self-improvement review: {summary}",
+            )
             agent._safe_print(
-                f"  💾 Self-improvement review: {summary}"
+                f"  {notification}"
             )
             _bg_cb = agent.background_review_callback
             if _bg_cb:
                 try:
-                    _bg_cb(
-                        f"💾 Self-improvement review: {summary}"
-                    )
+                    _bg_cb(notification)
                 except Exception:
                     pass
 

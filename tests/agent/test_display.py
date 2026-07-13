@@ -645,6 +645,25 @@ class TestBuildToolLabel:
             "long_running", {"elapsed_minutes": 3},
         ) == "もう3分だよ。待っててね♡"
 
+    def test_soul_status_label_can_require_exact_key(self, tmp_path, monkeypatch):
+        from agent.display import build_soul_status_label
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            "---\n"
+            "status_progress_labels:\n"
+            '  default: "generic"\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert build_soul_status_label("missing", {}) == "generic"
+        assert build_soul_status_label(
+            "missing", {}, allow_default=False,
+        ) is None
+
     def test_soul_status_label_with_unknown_token_uses_caller_fallback(
         self, tmp_path, monkeypatch,
     ):

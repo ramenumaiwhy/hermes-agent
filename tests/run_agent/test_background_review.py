@@ -473,3 +473,43 @@ def test_skill_patch_off_silent_verbose_shows_diff():
     )
     assert len(verbose) == 1
     assert "demo" in verbose[0] and "→" in verbose[0]
+
+
+def test_skill_patch_verbose_uses_soul_persona_copy(tmp_path, monkeypatch):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  self_improvement_skill_patched: "📝 スキル「{skill_name}」をお手入れしたよ♡ 「{old_preview}」→「{new_preview}」"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    actions = summarize_background_review_actions(
+        _skill_patch_review(), [], notification_mode="verbose"
+    )
+
+    assert actions == ["📝 スキル「demo」をお手入れしたよ♡ 「a」→「b」"]
+
+
+def test_self_improvement_wrapper_uses_soul_persona_copy(tmp_path, monkeypatch):
+    from agent.background_review import _soul_review_copy
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  self_improvement_review: "💾 もっと頼れるようにお手入れしたよ♡ {summary}"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    assert _soul_review_copy(
+        "self_improvement_review",
+        {"summary": "スキル更新"},
+        "fallback",
+    ) == "💾 もっと頼れるようにお手入れしたよ♡ スキル更新"

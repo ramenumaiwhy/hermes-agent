@@ -113,6 +113,39 @@ class TestEditMessageHappyPath:
         assert result.success is False
 
 
+class TestDeleteMessage:
+    @pytest.mark.asyncio
+    async def test_deletes_fetched_discord_message(self):
+        adapter = _make_adapter()
+        msg = SimpleNamespace(id=42, delete=AsyncMock())
+        channel, _sends = _wire_channel(adapter, original_msg=msg)
+        adapter._last_overflow_preview[("555", "42")] = "preview"
+
+        assert await adapter.delete_message("555", "42") is True
+
+        channel.fetch_message.assert_awaited_once_with(42)
+        msg.delete.assert_awaited_once_with()
+        assert ("555", "42") not in adapter._last_overflow_preview
+
+    @pytest.mark.asyncio
+    async def test_delete_without_client_is_safe_noop(self):
+        adapter = _make_adapter()
+        adapter._client = None
+
+        assert await adapter.delete_message("555", "42") is False
+
+    @pytest.mark.asyncio
+    async def test_delete_failure_is_best_effort(self):
+        adapter = _make_adapter()
+        msg = SimpleNamespace(
+            id=42,
+            delete=AsyncMock(side_effect=RuntimeError("already gone")),
+        )
+        _channel, _sends = _wire_channel(adapter, original_msg=msg)
+
+        assert await adapter.delete_message("555", "42") is False
+
+
 # --------------------------------------------------------------------------- #
 # Mid-stream overflow — TRUNCATE, never split (the #48648 lesson)
 # --------------------------------------------------------------------------- #
