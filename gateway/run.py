@@ -5743,6 +5743,48 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception as e:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
 
+    def _soul_lifecycle_message(
+        self,
+        status_name: str,
+        fallback: str,
+        source: Optional[SessionSource] = None,
+        values: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Render an exact SOUL lifecycle label with a safe built-in fallback."""
+        try:
+            from agent.display import build_soul_status_label
+
+            if (
+                source is not None
+                and getattr(self.config, "multiplex_profiles", False)
+            ):
+                with _profile_runtime_scope(
+                    self._resolve_profile_home_for_source(source)
+                ):
+                    return (
+                        build_soul_status_label(
+                            status_name,
+                            values,
+                            allow_default=False,
+                        )
+                        or fallback
+                    )
+            return (
+                build_soul_status_label(
+                    status_name,
+                    values,
+                    allow_default=False,
+                )
+                or fallback
+            )
+        except Exception:
+            logger.debug(
+                "Failed to render SOUL lifecycle notification: %s",
+                status_name,
+                exc_info=True,
+            )
+            return fallback
+
     async def _notify_active_sessions_of_shutdown(self) -> None:
         """Send shutdown/restart notifications to active chats and home channels.
 
@@ -5763,35 +5805,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             fallback = f"⚠️ Gateway {action} — {hint}"
 
-            def _render() -> str:
-                from agent.display import build_soul_status_label
-
-                return build_soul_status_label(
-                    (
-                        "gateway_restarting_interrupt"
-                        if self._restart_requested
-                        else "gateway_shutdown_interrupt"
-                    ),
-                    {"action": action},
-                    allow_default=False,
-                ) or fallback
-
-            try:
-                if (
-                    source is not None
-                    and getattr(self.config, "multiplex_profiles", False)
-                ):
-                    with _profile_runtime_scope(
-                        self._resolve_profile_home_for_source(source)
-                    ):
-                        return _render()
-                return _render()
-            except Exception:
-                logger.debug(
-                    "Failed to render SOUL shutdown notification",
-                    exc_info=True,
-                )
-                return fallback
+            return self._soul_lifecycle_message(
+                (
+                    "gateway_restarting_interrupt"
+                    if self._restart_requested
+                    else "gateway_shutdown_interrupt"
+                ),
+                fallback,
+                source,
+                {"action": action},
+            )
 
         notified: set[tuple[str, str, Optional[str], str]] = set()
         for session_key in active:
@@ -15016,12 +15039,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             chat_type = data.get("chat_type")
             thread_id = data.get("thread_id")
             message_id = data.get("message_id")
+            profile_name = (data.get("profile") or "").strip() or None
 
             if not platform_str or not chat_id:
                 return None
 
             platform = Platform(platform_str)
-            adapter = self.adapters.get(platform)
+            source = SessionSource(
+                platform=platform,
+                chat_id=str(chat_id),
+                chat_type=chat_type or "dm",
+                thread_id=str(thread_id) if thread_id else None,
+                message_id=str(message_id) if message_id else None,
+                profile=profile_name,
+            )
+            adapter = self._adapter_for_source(source)
             if not adapter:
                 logger.debug(
                     "Restart notification skipped: %s adapter not connected",
@@ -15029,7 +15061,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 return None
 
-            platform_cfg = self.config.platforms.get(platform)
+            platform_cfg = (
+                getattr(adapter, "config", None)
+                if profile_name and profile_name != "default"
+                else self.config.platforms.get(platform)
+            )
             if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
                 logger.info(
                     "Restart notification suppressed: %s has gateway_restart_notification=false",
@@ -15047,7 +15083,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             result = await adapter.send(
                 str(chat_id),
-                "♻ Gateway restarted successfully. Your session continues.",
+                self._soul_lifecycle_message(
+                    "gateway_restart_complete",
+                    "♻ Gateway restarted successfully. Your session continues.",
+                    source,
+                ),
                 metadata=_non_conversational_metadata(metadata, platform=platform),
             )
             # adapter.send() catches provider errors (e.g. "Chat not found")
@@ -15088,7 +15128,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         delivered: set[tuple[str, str, Optional[str]]] = set()
         skipped = skip_targets or set()
-        message = "♻️ Gateway online — Hermes is back and ready."
+        message = self._soul_lifecycle_message(
+            "gateway_online_ready",
+            "♻️ Gateway online — Hermes is back and ready.",
+        )
 
         for platform, adapter in self.adapters.items():
             home = self.config.get_home_channel(platform)

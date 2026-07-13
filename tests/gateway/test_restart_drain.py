@@ -486,6 +486,28 @@ async def test_shutdown_notification_uses_exact_soul_copy(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_notification_preserves_soul_action_placeholder(
+    tmp_path, monkeypatch,
+):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  gateway_shutdown_interrupt: "いま{action}だよ♡"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    runner, adapter = make_restart_runner()
+    runner._running_agents["agent:main:telegram:dm:999"] = MagicMock()
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert adapter.sent == ["いまshutting downだよ♡"]
+
+
+@pytest.mark.asyncio
 async def test_shutdown_notification_uses_source_profile_soul(
     tmp_path, monkeypatch,
 ):

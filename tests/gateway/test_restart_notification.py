@@ -78,6 +78,26 @@ async def test_restart_command_writes_notify_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_restart_command_preserves_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner, _adapter = make_restart_runner()
+    runner.request_restart = MagicMock(return_value=True)
+    source = make_restart_source(chat_id="42")
+    source.profile = "coder"
+    event = MessageEvent(
+        text="/restart",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="m1",
+    )
+
+    await runner._handle_restart_command(event)
+
+    data = json.loads((tmp_path / ".restart_notify.json").read_text())
+    assert data["profile"] == "coder"
+
+
+@pytest.mark.asyncio
 async def test_restart_command_uses_service_restart_under_systemd(tmp_path, monkeypatch):
     """Under systemd (INVOCATION_ID set), /restart uses via_service=True."""
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
@@ -268,6 +288,32 @@ async def test_send_home_channel_startup_notification_to_configured_home(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_send_home_channel_startup_notification_uses_exact_soul_copy(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  gateway_online_ready: "戻ってきたよ♡"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    runner, adapter = make_restart_runner()
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="home-42",
+        name="Ops Home",
+    )
+    adapter.send = AsyncMock()
+
+    await runner._send_home_channel_startup_notifications()
+
+    adapter.send.assert_called_once_with("home-42", "戻ってきたよ♡")
+
+
+@pytest.mark.asyncio
 async def test_send_home_channel_startup_notification_preserves_thread_metadata(
     tmp_path, monkeypatch
 ):
@@ -396,6 +442,51 @@ async def test_send_restart_notification_delivers_and_cleans_up(tmp_path, monkey
     assert "restarted" in call_args[0][1].lower()
     assert call_args[1].get("metadata") is None  # no thread
     assert not notify_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_send_restart_notification_uses_source_profile_soul(
+    tmp_path, monkeypatch,
+):
+    default_home = tmp_path / "hermes"
+    profile_home = default_home / "profiles" / "coder"
+    default_home.mkdir()
+    profile_home.mkdir(parents=True)
+    (default_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  gateway_restart_complete: "wrong profile"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    (profile_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  gateway_restart_complete: "再起動できたよ♡"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", default_home)
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    (default_home / ".restart_notify.json").write_text(json.dumps({
+        "platform": "telegram",
+        "chat_id": "42",
+        "profile": "coder",
+    }))
+    runner, default_adapter = make_restart_runner()
+    coder_adapter = type(default_adapter)()
+    coder_adapter.send = AsyncMock()
+    runner.config.multiplex_profiles = True
+    runner._profile_adapters = {
+        "coder": {Platform.TELEGRAM: coder_adapter},
+    }
+
+    delivered_target = await runner._send_restart_notification()
+
+    assert delivered_target == ("telegram", "42", None)
+    assert default_adapter.sent == []
+    coder_adapter.send.assert_called_once()
+    assert coder_adapter.send.call_args.args[1] == "再起動できたよ♡"
 
 
 @pytest.mark.asyncio

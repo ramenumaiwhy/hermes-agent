@@ -1246,6 +1246,8 @@ class GatewaySlashCommandsMixin:
             }
             if event.source.thread_id:
                 notify_data["thread_id"] = event.source.thread_id
+            if event.source.profile:
+                notify_data["profile"] = event.source.profile
             if event.message_id:
                 notify_data["message_id"] = event.message_id
             if event.source is not None:
