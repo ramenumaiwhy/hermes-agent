@@ -456,6 +456,122 @@ async def test_shutdown_notification_says_restarting_when_restart_requested():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("restart_requested", "status_key", "expected"),
+    [
+        (False, "gateway_shutdown_interrupt", "終了するから待っててね♡"),
+        (True, "gateway_restarting_interrupt", "再起動したら続けようね♡"),
+    ],
+)
+async def test_shutdown_notification_uses_exact_soul_copy(
+    tmp_path, monkeypatch, restart_requested, status_key, expected,
+):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        f'  {status_key}: "{expected}"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    runner, adapter = make_restart_runner()
+    runner._restart_requested = restart_requested
+    runner._running_agents["agent:main:telegram:dm:999"] = MagicMock()
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert adapter.sent == [expected]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_notification_uses_source_profile_soul(
+    tmp_path, monkeypatch,
+):
+    default_home = tmp_path / "hermes"
+    profile_home = default_home / "profiles" / "coder"
+    default_home.mkdir()
+    profile_home.mkdir(parents=True)
+    (default_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  gateway_shutdown_interrupt: "wrong profile"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    (profile_home / "SOUL.md").write_text(
+        "---\n"
+        "status_progress_labels:\n"
+        '  gateway_shutdown_interrupt: "coder profile♡"\n'
+        "---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    runner, default_adapter = make_restart_runner()
+    coder_adapter = type(default_adapter)()
+    runner.config.multiplex_profiles = True
+    runner._profile_adapters = {
+        "coder": {gateway_run.Platform.TELEGRAM: coder_adapter},
+    }
+    source = make_restart_source(chat_id="999", chat_type="dm")
+    source.profile = "coder"
+    session_key = runner._session_key_for_source(source)
+    runner._running_agents[session_key] = MagicMock()
+    runner.session_store._entries[session_key] = MagicMock(origin=source)
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert default_adapter.sent == []
+    assert coder_adapter.sent == ["coder profile♡"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_notification_honors_source_profile_flag():
+    runner, default_adapter = make_restart_runner()
+    coder_adapter = type(default_adapter)()
+    coder_adapter.config.gateway_restart_notification = False
+    runner.config.multiplex_profiles = True
+    runner._profile_adapters = {
+        "coder": {gateway_run.Platform.TELEGRAM: coder_adapter},
+    }
+    source = make_restart_source(chat_id="999", chat_type="dm")
+    source.profile = "coder"
+    session_key = runner._session_key_for_source(source)
+    runner._running_agents[session_key] = MagicMock()
+    runner.session_store._entries[session_key] = MagicMock(origin=source)
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert default_adapter.sent == []
+    assert coder_adapter.sent == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_notification_deduplicates_per_profile():
+    runner, default_adapter = make_restart_runner()
+    coder_adapter = type(default_adapter)()
+    runner.config.multiplex_profiles = True
+    runner._profile_adapters = {
+        "coder": {gateway_run.Platform.TELEGRAM: coder_adapter},
+    }
+    default_source = make_restart_source(chat_id="999", chat_type="dm")
+    coder_source = make_restart_source(chat_id="999", chat_type="dm")
+    coder_source.profile = "coder"
+    default_key = runner._session_key_for_source(default_source)
+    coder_key = runner._session_key_for_source(coder_source)
+    runner._running_agents[default_key] = MagicMock()
+    runner._running_agents[coder_key] = MagicMock()
+    runner.session_store._entries[default_key] = MagicMock(origin=default_source)
+    runner.session_store._entries[coder_key] = MagicMock(origin=coder_source)
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert len(default_adapter.sent) == 1
+    assert len(coder_adapter.sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_shutdown_notification_deduplicates_per_chat():
     """Multiple sessions in the same chat only get one notification."""
     runner, adapter = make_restart_runner()

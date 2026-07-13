@@ -5753,16 +5753,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         active = self._snapshot_running_agents()
         restart_source = self._restart_command_source if self._restart_requested else None
 
-        action = "restarting" if self._restart_requested else "shutting down"
-        hint = (
-            "Your current task will be interrupted. "
-            "Send any message after restart and I'll try to resume where you left off."
-            if self._restart_requested
-            else "Your current task will be interrupted."
-        )
-        msg = f"⚠️ Gateway {action} — {hint}"
+        def _shutdown_message(source: Optional[SessionSource] = None) -> str:
+            action = "restarting" if self._restart_requested else "shutting down"
+            hint = (
+                "Your current task will be interrupted. "
+                "Send any message after restart and I'll try to resume where you left off."
+                if self._restart_requested
+                else "Your current task will be interrupted."
+            )
+            fallback = f"⚠️ Gateway {action} — {hint}"
 
-        notified: set[tuple[str, str, Optional[str]]] = set()
+            def _render() -> str:
+                from agent.display import build_soul_status_label
+
+                return build_soul_status_label(
+                    (
+                        "gateway_restarting_interrupt"
+                        if self._restart_requested
+                        else "gateway_shutdown_interrupt"
+                    ),
+                    {"action": action},
+                    allow_default=False,
+                ) or fallback
+
+            try:
+                if (
+                    source is not None
+                    and getattr(self.config, "multiplex_profiles", False)
+                ):
+                    with _profile_runtime_scope(
+                        self._resolve_profile_home_for_source(source)
+                    ):
+                        return _render()
+                return _render()
+            except Exception:
+                logger.debug(
+                    "Failed to render SOUL shutdown notification",
+                    exc_info=True,
+                )
+                return fallback
+
+        notified: set[tuple[str, str, Optional[str], str]] = set()
         for session_key in active:
             source = None
             try:
@@ -5797,17 +5828,40 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Deduplicate only identical delivery targets. Thread/topic-aware
             # platforms can share a parent chat while still routing to distinct
             # destinations via metadata.
-            dedup_key = (platform_str, chat_id, str(thread_id) if thread_id else None)
+            delivery_profile = (
+                (getattr(source, "profile", None) or "").strip()
+                if source is not None
+                else ""
+            ) or "default"
+            dedup_key = (
+                platform_str,
+                chat_id,
+                str(thread_id) if thread_id else None,
+                delivery_profile,
+            )
             if dedup_key in notified:
                 continue
 
             try:
                 platform = Platform(platform_str)
-                adapter = self.adapters.get(platform)
+                adapter = (
+                    self._adapter_for_source(source)
+                    if source is not None
+                    else self.adapters.get(platform)
+                )
                 if not adapter:
                     continue
 
-                platform_cfg = self.config.platforms.get(platform)
+                profile_name = (
+                    (getattr(source, "profile", None) or "").strip()
+                    if source is not None
+                    else ""
+                )
+                platform_cfg = (
+                    getattr(adapter, "config", None)
+                    if profile_name and profile_name != "default"
+                    else self.config.platforms.get(platform)
+                )
                 if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
                     logger.info(
                         "Shutdown notification suppressed for active session: %s has gateway_restart_notification=false",
@@ -5821,7 +5875,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         restart_platform = restart_source.platform.value
                         restart_chat_id = str(restart_source.chat_id)
                         restart_thread_id = str(restart_source.thread_id) if restart_source.thread_id else None
-                        if (restart_platform, restart_chat_id, restart_thread_id) == dedup_key:
+                        restart_profile = (
+                            (getattr(restart_source, "profile", None) or "").strip()
+                            or "default"
+                        )
+                        if (
+                            restart_platform,
+                            restart_chat_id,
+                            restart_thread_id,
+                            restart_profile,
+                        ) == dedup_key:
                             reply_to_message_id = getattr(restart_source, "message_id", None)
                     except Exception:
                         pass
@@ -5835,7 +5898,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter=adapter,
                 )
 
-                result = await adapter.send(chat_id, msg, metadata=metadata)
+                result = await adapter.send(
+                    chat_id,
+                    _shutdown_message(source),
+                    metadata=metadata,
+                )
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to %s:%s: %s",
@@ -5904,7 +5971,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 continue
 
-            dedup_key = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
+            dedup_key = (
+                platform.value,
+                str(home.chat_id),
+                str(home.thread_id) if home.thread_id else None,
+                "default",
+            )
             if dedup_key in notified:
                 continue
 
@@ -5915,6 +5987,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     home.thread_id,
                     adapter=adapter,
                 )
+                msg = _shutdown_message()
                 if metadata:
                     result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
                 else:
